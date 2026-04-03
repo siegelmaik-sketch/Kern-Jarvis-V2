@@ -5,41 +5,61 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
-class TestParseJson:
-    """Test the _parse_llm_json helper — critical for parsing LLM responses."""
+class TestParseLlmJson:
+    """Test the parse_llm_json helper — critical for parsing LLM responses."""
 
     def test_plain_json(self):
-        from kern.memory import _parse_llm_json
-        assert _parse_llm_json('{"save": true, "importance": 7}') == {"save": True, "importance": 7}
+        from kern.memory import parse_llm_json
+        assert parse_llm_json('{"save": true, "importance": 7}') == {"save": True, "importance": 7}
 
     def test_json_code_block(self):
-        from kern.memory import _parse_llm_json
-        result = _parse_llm_json('```json\n{"save": false}\n```')
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('```json\n{"save": false}\n```')
         assert result == {"save": False}
 
     def test_code_block_no_lang(self):
-        from kern.memory import _parse_llm_json
-        result = _parse_llm_json('```\n{"save": true}\n```')
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('```\n{"save": true}\n```')
         assert result == {"save": True}
 
     def test_json_with_surrounding_text(self):
-        from kern.memory import _parse_llm_json
-        result = _parse_llm_json('Sure, here is the result: {"save": true, "importance": 5}')
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('Sure, here is the result: {"save": true, "importance": 5}')
         assert result["save"] is True
 
-    def test_invalid_json(self):
-        from kern.memory import _parse_llm_json
-        assert _parse_llm_json("not json at all") is None
+    def test_invalid_json_returns_none(self):
+        from kern.memory import parse_llm_json
+        assert parse_llm_json("not json at all") is None
 
-    def test_empty_string(self):
-        from kern.memory import _parse_llm_json
-        assert _parse_llm_json("") is None
+    def test_empty_string_returns_none(self):
+        from kern.memory import parse_llm_json
+        assert parse_llm_json("") is None
 
-    def test_nested_json(self):
-        from kern.memory import _parse_llm_json
-        # Only extracts first-level object
-        result = _parse_llm_json('{"save": true}')
-        assert result == {"save": True}
+    def test_nested_json_object(self):
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('{"a": {"b": 1}, "c": 2}')
+        assert result == {"a": {"b": 1}, "c": 2}
+
+    def test_nested_json_in_text(self):
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('Here: {"outer": {"inner": true}, "value": 42}')
+        assert result == {"outer": {"inner": True}, "value": 42}
+
+    def test_json_array(self):
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('[{"type": "todo"}, {"type": "fakt"}]')
+        assert isinstance(result, list)
+        assert len(result) == 2
+
+    def test_json_array_in_text(self):
+        from kern.memory import parse_llm_json
+        result = parse_llm_json('Result: [{"save": true}]')
+        assert isinstance(result, list)
+        assert result[0]["save"] is True
+
+    def test_backward_compat_alias(self):
+        from kern.memory import _parse_llm_json, parse_llm_json
+        assert _parse_llm_json is parse_llm_json
 
 
 class TestCosineSimilarity:
@@ -66,7 +86,7 @@ class TestCosineSimilarity:
         b = np.array([0.0, 0.0], dtype=np.float32)
         assert _cosine_similarity(a, b) == 0.0
 
-    def test_dimension_mismatch(self):
+    def test_dimension_mismatch_returns_zero(self):
         from kern.memory import _cosine_similarity
         a = np.array([1.0, 2.0, 3.0], dtype=np.float32)
         b = np.array([1.0, 2.0], dtype=np.float32)
@@ -134,7 +154,6 @@ class TestLoadContext:
             append_message({"role": "user", "content": f"msg {i}"})
         ctx = load_context(max_messages=5)
         assert len(ctx) == 5
-        # Should be the 5 most recent
         assert ctx[-1]["content"] == "msg 29"
         assert ctx[0]["content"] == "msg 25"
 
@@ -160,7 +179,7 @@ class TestSaveFact:
     def test_duplicate_ignored(self, db_path, mock_embedding):
         from kern.memory import save_fact, get_facts
         save_fact("Fakt 1", source="user")
-        save_fact("Fakt 1", source="user")  # duplicate
+        save_fact("Fakt 1", source="user")
         assert len(get_facts()) == 1
 
     def test_user_gets_high_importance(self, db_path, mock_embedding):
@@ -170,10 +189,13 @@ class TestSaveFact:
         assert facts[0]["importance"] == 7
 
     def test_agent_fact_goes_through_gate(self, db_path, mock_embedding):
-        from kern.memory import save_fact
+        from kern.memory import save_fact, get_facts
         with patch("kern.memory._gate_fact", return_value=(True, 6)) as gate:
             save_fact("Fakt", source="agent")
             gate.assert_called_once()
+            facts = get_facts()
+            assert len(facts) == 1
+            assert facts[0]["importance"] == 6
 
     def test_agent_fact_rejected_by_gate(self, db_path, mock_embedding):
         from kern.memory import save_fact, get_facts
@@ -215,7 +237,6 @@ class TestGetRelevantFacts:
         from kern.memory import save_fact, get_relevant_facts
         save_fact("User Name: Maik", category="preference", source="user", importance=9)
         facts = get_relevant_facts(query="unrelated topic")
-        # Preference should always be loaded (Tier 1)
         pref = [f for f in facts if f["category"] == "preference"]
         assert len(pref) >= 1
 
@@ -231,7 +252,6 @@ class TestSearchFacts:
         save_fact("Wetter in Berlin", source="user")
         results = search_facts("Bitcoin")
         assert len(results) >= 1
-        # Results should have similarity scores
         assert "similarity" in results[0]
 
     def test_without_embedding_fallback(self, db_path, mock_embedding):
@@ -239,7 +259,6 @@ class TestSearchFacts:
         save_fact("Test fact", source="user")
         with patch("kern.memory._get_embedding", return_value=None):
             results = search_facts("test")
-            # Fallback to get_facts
             assert len(results) >= 1
 
 
@@ -333,14 +352,26 @@ class TestGateFact:
         from kern.memory import _gate_fact
         with patch("kern.brain.memory_chat", side_effect=Exception("API down")):
             should_save, importance = _gate_fact("Some fact", "general")
-            assert should_save is True  # permissive on failure
+            assert should_save is True
             assert importance == 5
 
 
 class TestConversationTopic:
     def test_initial_topic_empty(self):
         from kern.memory import get_conversation_topic
-        # Don't test the actual value since global state may be dirty,
-        # just test it doesn't crash
-        result = get_conversation_topic()
-        assert isinstance(result, str)
+        assert get_conversation_topic() == ""
+
+    def test_update_topic(self, db_path):
+        from kern.memory import update_conversation_topic, get_conversation_topic
+        import kern.memory as mem
+        # Force topic update by setting counter to threshold - 1
+        with mem._topic_lock:
+            mem._topic_message_count = 4
+
+        messages = [
+            {"role": "user", "content": "Was kostet Bitcoin?"},
+            {"role": "assistant", "content": "Bitcoin steht bei 50k."},
+        ]
+        with patch("kern.brain.memory_chat", return_value="TOPIC: Bitcoin Kurs\nKEYWORDS: bitcoin, kurs, preis"):
+            update_conversation_topic(messages)
+            assert "Bitcoin" in get_conversation_topic()

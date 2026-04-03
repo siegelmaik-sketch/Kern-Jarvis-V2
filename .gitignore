@@ -8,3 +8,23 @@ __pycache__/
 *.db-shm
 tools/*.py
 !tools/.gitkeep
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Test
+.pytest_cache/
+htmlcov/
+.coverage

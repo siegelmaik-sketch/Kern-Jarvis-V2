@@ -3,11 +3,14 @@ Jarvis baut sich Tools selbst.
 Erkennt REGISTER_TOOL, BUILD_TOOL, RUN_TOOL, MEMORY_SAVE/GET/SEARCH
 Befehle in LLM-Antworten.
 """
-import re
 import json
-from kern.tools import save_tool_script, register_tool, run_tool
-from kern.brain import chat
+import logging
+import re
 
+from kern.tools import save_tool_script, register_tool, run_tool
+from kern.exceptions import ToolSecurityError
+
+log = logging.getLogger(__name__)
 
 BUILD_TOOL_PROMPT = """Du sollst ein Python-Tool schreiben für folgende Aufgabe: {task}
 
@@ -43,6 +46,9 @@ def extract_code_block(text: str) -> str | None:
 
 
 def build_tool(tool_name: str, description: str, task: str) -> dict:
+    from kern.brain import chat
+
+    log.info("Building tool: %s", tool_name)
     print(f"\n  Tool bauen: {tool_name}...")
 
     prompt = BUILD_TOOL_PROMPT.format(
@@ -67,24 +73,36 @@ def build_tool(tool_name: str, description: str, task: str) -> dict:
         print(f"  ... ({len(code.split(chr(10)))} Zeilen gesamt)")
 
     try:
-        confirm = input("\n  Tool speichern und testen? [J/n] → ").strip().lower()
+        confirm = input("\n  Tool speichern und testen? [J/n] -> ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return {"success": False, "error": "Abgebrochen"}
 
     if confirm in ("n", "nein", "no"):
         return {"success": False, "error": "Vom User abgelehnt"}
 
-    script_path = save_tool_script(tool_name, code)
+    try:
+        script_path = save_tool_script(tool_name, code)
+    except ToolSecurityError as e:
+        log.error("Tool security violation: %s", e)
+        return {"success": False, "error": str(e)}
+
     print(f"  Script gespeichert: {script_path}")
 
     test_result = run_tool_temp(tool_name, code, {})
     if test_result.get("success") is False and "error" in test_result:
+        log.warning("Tool test failed [%s]: %s", tool_name, test_result["error"])
         print(f"  Warnung: {test_result['error']}")
     else:
-        print(f"  Test OK")
+        print("  Test OK")
 
-    register_tool(tool_name, description, script_path)
-    print(f"  Registriert im Manifest")
+    try:
+        register_tool(tool_name, description, script_path)
+    except ToolSecurityError as e:
+        log.error("Tool registration failed: %s", e)
+        return {"success": False, "error": str(e)}
+
+    log.info("Tool built and registered: %s -> %s", tool_name, script_path)
+    print("  Registriert im Manifest")
 
     return {"success": True, "tool_name": tool_name, "script_path": script_path}
 
@@ -110,7 +128,7 @@ def run_tool_temp(name: str, code: str, args: dict) -> dict:
 
 
 def parse_jarvis_commands(text: str) -> list[dict]:
-    commands = []
+    commands: list[dict] = []
 
     register_matches = re.finditer(
         r"REGISTER_TOOL\(name=['\"](.+?)['\"],\s*description=['\"](.+?)['\"],\s*script_path=['\"](.+?)['\"]\)",
@@ -176,12 +194,12 @@ def parse_jarvis_commands(text: str) -> list[dict]:
         re.DOTALL
     )
     for m in run_matches:
-        args = {}
+        args: dict = {}
         if m.group(2):
             try:
                 args = json.loads(m.group(2))
-            except Exception:
-                pass
+            except json.JSONDecodeError:
+                log.warning("RUN_TOOL args parse failed: %s", m.group(2)[:100])
         commands.append({
             "type": "run_tool",
             "name": m.group(1),
@@ -193,37 +211,45 @@ def parse_jarvis_commands(text: str) -> list[dict]:
 
 def execute_commands(commands: list[dict]) -> list[dict]:
     from kern.memory import memory_save, search_fact_by_key, search_facts
-    results = []
+    results: list[dict] = []
 
     for cmd in commands:
-        if cmd["type"] == "build_tool":
-            result = build_tool(cmd["name"], cmd["description"], cmd["task"])
-            results.append(result)
+        try:
+            if cmd["type"] == "build_tool":
+                result = build_tool(cmd["name"], cmd["description"], cmd["task"])
+                results.append(result)
 
-        elif cmd["type"] == "register_tool":
-            register_tool(cmd["name"], cmd["description"], cmd["script_path"])
-            results.append({"success": True, "registered": cmd["name"]})
+            elif cmd["type"] == "register_tool":
+                register_tool(cmd["name"], cmd["description"], cmd["script_path"])
+                results.append({"success": True, "registered": cmd["name"]})
 
-        elif cmd["type"] == "memory_save":
-            memory_save(cmd["memory_type"], cmd["key"], cmd["value"])
-            results.append({"success": True, "saved": cmd["key"]})
+            elif cmd["type"] == "memory_save":
+                memory_save(cmd["memory_type"], cmd["key"], cmd["value"])
+                results.append({"success": True, "saved": cmd["key"]})
 
-        elif cmd["type"] == "memory_get":
-            facts = search_fact_by_key(cmd["key"])
-            if facts:
-                results.append({"success": True, "result": "; ".join(f["fact"] for f in facts)})
-            else:
-                results.append({"success": True, "result": f"Kein Eintrag für '{cmd['key']}'"})
+            elif cmd["type"] == "memory_get":
+                facts = search_fact_by_key(cmd["key"])
+                if facts:
+                    results.append({"success": True, "result": "; ".join(f["fact"] for f in facts)})
+                else:
+                    results.append({"success": True, "result": f"Kein Eintrag für '{cmd['key']}'"})
 
-        elif cmd["type"] == "memory_search":
-            facts = search_facts(cmd["query"], limit=5)
-            if facts:
-                results.append({"success": True, "result": "; ".join(f["fact"] for f in facts[:5])})
-            else:
-                results.append({"success": True, "result": "Keine Ergebnisse"})
+            elif cmd["type"] == "memory_search":
+                facts = search_facts(cmd["query"], limit=5)
+                if facts:
+                    results.append({"success": True, "result": "; ".join(f["fact"] for f in facts[:5])})
+                else:
+                    results.append({"success": True, "result": "Keine Ergebnisse"})
 
-        elif cmd["type"] == "run_tool":
-            result = run_tool(cmd["name"], cmd.get("args", {}))
-            results.append(result)
+            elif cmd["type"] == "run_tool":
+                result = run_tool(cmd["name"], cmd.get("args", {}))
+                results.append(result)
+
+        except ToolSecurityError as e:
+            log.error("Security violation in command %s: %s", cmd["type"], e)
+            results.append({"success": False, "error": f"Sicherheitsfehler: {e}"})
+        except Exception as e:
+            log.error("Command execution failed [%s]: %s", cmd["type"], e)
+            results.append({"success": False, "error": str(e)})
 
     return results

@@ -1,10 +1,10 @@
 """
 Kern-Jarvis V2 Memory — Persistent, Untruncated
-═════════════════════════════════════════════════
+=================================================
 Tiers (wie V1):
-1. messages   → every message ever, untruncated, append-only
-2. archives   → semantic search via embeddings
-3. facts      → persistent key facts with quality gate
+1. messages   -> every message ever, untruncated, append-only
+2. archives   -> semantic search via embeddings
+3. facts      -> persistent key facts with quality gate
 
 Context loading: read newest messages until budget is full.
 Nothing is ever truncated on write — only on load into the LLM context.
@@ -21,7 +21,7 @@ from datetime import datetime
 import httpx
 import numpy as np
 
-from kern.db import get_connection, get_config
+from kern.db import connection, get_config
 
 log = logging.getLogger(__name__)
 
@@ -101,8 +101,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def append_message(msg: dict) -> None:
     """Append a single message to persistent storage. No truncation."""
-    conn = get_connection()
-    try:
+    with connection() as conn:
         role = msg.get("role", "user")
         content = msg.get("content")
         tool_calls = msg.get("tool_calls")
@@ -112,30 +111,25 @@ def append_message(msg: dict) -> None:
             (role, content, json.dumps(tool_calls) if tool_calls else None, tool_call_id)
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
     """Load last N messages for current conversation context.
     Returns messages in chronological order (oldest first).
     """
-    conn = get_connection()
-    try:
+    with connection() as conn:
         rows = conn.execute(
             "SELECT role, content, tool_calls, tool_call_id FROM messages "
             "ORDER BY id DESC LIMIT ?",
             (max_messages,)
         ).fetchall()
-    finally:
-        conn.close()
 
     if not rows:
         return []
 
     msgs = []
     for r in rows:
-        msg = {"role": r["role"]}
+        msg: dict = {"role": r["role"]}
         if r["content"] is not None:
             msg["content"] = r["content"]
         if r["tool_calls"]:
@@ -149,21 +143,14 @@ def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
 
 
 def get_message_count() -> int:
-    conn = get_connection()
-    try:
-        count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-    finally:
-        conn.close()
-    return count
+    with connection() as conn:
+        return conn.execute("SELECT count(*) FROM messages").fetchone()[0]
 
 
 def clear_messages() -> None:
-    conn = get_connection()
-    try:
+    with connection() as conn:
         conn.execute("DELETE FROM messages")
         conn.commit()
-    finally:
-        conn.close()
 
 
 # ── Fact Quality Gate ────────────────────────────────────────────────────────
@@ -188,16 +175,16 @@ def _gate_fact(fact: str, category: str) -> tuple[bool, int]:
             ),
             max_tokens=50,
         )
-        parsed = _parse_llm_json(text)
-        if parsed and "save" in parsed:
+        parsed = parse_llm_json(text)
+        if parsed and isinstance(parsed, dict) and "save" in parsed:
             return bool(parsed["save"]), int(parsed.get("importance", 5))
     except Exception as e:
         log.warning("Fact gate failed, allowing fact: %s", e)
     return True, 5
 
 
-def _parse_llm_json(raw: str) -> dict | None:
-    """Extract JSON from LLM response, handling ```json blocks."""
+def parse_llm_json(raw: str) -> dict | list | None:
+    """Extract JSON from LLM response, handling ```json blocks and surrounding text."""
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -205,13 +192,30 @@ def _parse_llm_json(raw: str) -> dict | None:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r"\{[^}]+\}", raw)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-    return None
+        # Find JSON with balanced braces (handles nested objects)
+        # Try whichever bracket appears first in the text
+        candidates = [("{", "}"), ("[", "]")]
+        candidates.sort(key=lambda pair: (raw.find(pair[0]) if raw.find(pair[0]) != -1 else float("inf")))
+        for start_char, end_char in candidates:
+            start = raw.find(start_char)
+            if start == -1:
+                continue
+            depth = 0
+            for i in range(start, len(raw)):
+                if raw[i] == start_char:
+                    depth += 1
+                elif raw[i] == end_char:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(raw[start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+        return None
+
+
+# Backward compat alias
+_parse_llm_json = parse_llm_json
 
 
 # ── Long-term Facts ──────────────────────────────────────────────────────────
@@ -223,7 +227,6 @@ def save_fact(
     importance: int | None = None,
 ) -> bool:
     """Save a fact with quality gate for agent sources."""
-    # Agent facts go through quality gate
     if source in ("agent", "implicit"):
         should_save, gate_importance = _gate_fact(fact, category)
         if not should_save:
@@ -232,30 +235,27 @@ def save_fact(
         if importance is None:
             importance = gate_importance
     elif importance is None:
-        importance = 7  # user/jarvis facts get high default importance
+        importance = 7
 
-    # Generate embedding
     embedding = _get_embedding(fact)
     embedding_blob = _embedding_to_blob(embedding) if embedding is not None else None
 
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            "INSERT INTO facts (category, fact, source, importance, embedding) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(fact) DO NOTHING",
-            (category, fact, source, importance, embedding_blob)
-        )
-        conn.commit()
-        saved = cur.rowcount > 0
-        if saved:
-            log.info("Fact saved [%s/%s/imp=%d]: %s", source, category, importance, fact[:80])
-        return saved
-    except Exception as e:
-        log.error("save_fact failed: %s", e)
-        return False
-    finally:
-        conn.close()
+    with connection() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO facts (category, fact, source, importance, embedding) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(fact) DO NOTHING",
+                (category, fact, source, importance, embedding_blob)
+            )
+            conn.commit()
+            saved = cur.rowcount > 0
+            if saved:
+                log.info("Fact saved [%s/%s/imp=%d]: %s", source, category, importance, fact[:80])
+            return saved
+        except Exception as e:
+            log.error("save_fact failed: %s", e)
+            return False
 
 
 def memory_save(memory_type: str, key: str, value: str) -> bool:
@@ -273,48 +273,38 @@ def memory_save(memory_type: str, key: str, value: str) -> bool:
 
 def get_facts(limit: int = 25) -> list[dict]:
     """Get facts ordered by importance then recency."""
-    conn = get_connection()
-    try:
+    with connection() as conn:
         rows = conn.execute(
             "SELECT id, category, fact, importance, source, created_at, last_accessed "
             "FROM facts ORDER BY importance DESC, created_at DESC LIMIT ?",
             (limit,)
         ).fetchall()
-    finally:
-        conn.close()
-    return [dict(r) for r in rows]
+        return [dict(r) for r in rows]
 
 
 def delete_fact(fact_id: int) -> bool:
-    conn = get_connection()
-    try:
+    with connection() as conn:
         cur = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
         conn.commit()
-    finally:
-        conn.close()
-    return cur.rowcount > 0
+        return cur.rowcount > 0
 
 
 def search_fact_by_key(key: str) -> list[dict]:
     """Search facts by key prefix (for MEMORY_GET)."""
-    conn = get_connection()
-    try:
+    with connection() as conn:
         rows = conn.execute(
             "SELECT id, category, fact, importance, source, created_at, last_accessed "
             "FROM facts WHERE fact LIKE ?",
             (f"[{key}]%",)
         ).fetchall()
-    finally:
-        conn.close()
-    return [dict(r) for r in rows]
+        return [dict(r) for r in rows]
 
 
 # ── Smart Fact Retrieval (3-Tier wie V1) ─────────────────────────────────────
 
 def get_relevant_facts(query: str | None = None, limit: int = 15) -> list[dict]:
     """Smart fact retrieval: always-load + semantic + recency tiers."""
-    conn = get_connection()
-    try:
+    with connection() as conn:
         collected: list[dict] = []
         seen_ids: set[int] = set()
 
@@ -379,8 +369,6 @@ def get_relevant_facts(query: str | None = None, limit: int = 15) -> list[dict]:
                 list(seen_ids)
             )
             conn.commit()
-    finally:
-        conn.close()
 
     return collected[:limit]
 
@@ -391,14 +379,11 @@ def search_facts(query: str, limit: int = 20) -> list[dict]:
     if query_embedding is None:
         return get_facts(limit)
 
-    conn = get_connection()
-    try:
+    with connection() as conn:
         rows = conn.execute(
             "SELECT id, category, fact, importance, source, created_at, last_accessed, embedding "
             "FROM facts WHERE embedding IS NOT NULL"
         ).fetchall()
-    finally:
-        conn.close()
 
     scored = []
     for r in rows:
@@ -418,18 +403,22 @@ def search_facts(query: str, limit: int = 20) -> list[dict]:
 _conversation_topic: str = ""
 _topic_keywords: list[str] = []
 _topic_message_count: int = 0
+_topic_updating: bool = False
 _TOPIC_UPDATE_INTERVAL = 5
 _topic_lock = threading.Lock()
 
 
 def update_conversation_topic(recent_messages: list[dict]) -> None:
     """Update current conversation topic from recent messages."""
-    global _conversation_topic, _topic_keywords, _topic_message_count
+    global _conversation_topic, _topic_keywords, _topic_message_count, _topic_updating
 
     with _topic_lock:
         _topic_message_count += 1
         if _topic_message_count % _TOPIC_UPDATE_INTERVAL != 0:
             return
+        if _topic_updating:
+            return
+        _topic_updating = True
 
     user_msgs = [
         m.get("content", "")[:200]
@@ -438,6 +427,8 @@ def update_conversation_topic(recent_messages: list[dict]) -> None:
     ][-5:]
 
     if not user_msgs:
+        with _topic_lock:
+            _topic_updating = False
         return
 
     text = "\n".join(user_msgs)
@@ -463,6 +454,9 @@ def update_conversation_topic(recent_messages: list[dict]) -> None:
         log.debug("Topic: %s | Keywords: %s", _conversation_topic, _topic_keywords)
     except Exception as e:
         log.debug("Topic update failed: %s", e)
+    finally:
+        with _topic_lock:
+            _topic_updating = False
 
 
 def get_conversation_topic() -> str:
@@ -484,23 +478,21 @@ def archive_conversation(
     embedding_blob = _embedding_to_blob(embedding) if embedding is not None else None
     archived_msgs = json.dumps(messages, ensure_ascii=False) if messages else None
 
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            "INSERT INTO archives (topic, summary, keywords, messages, embedding) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (topic, summary, json.dumps(keywords), archived_msgs, embedding_blob)
-        )
-        conn.commit()
-        archive_id = cur.lastrowid
-        log.info("Archived: %s (%d keywords, embedding=%s)",
-                 topic, len(keywords), embedding is not None)
-        return archive_id
-    except Exception as e:
-        log.error("archive_conversation failed: %s", e)
-        return None
-    finally:
-        conn.close()
+    with connection() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO archives (topic, summary, keywords, messages, embedding) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (topic, summary, json.dumps(keywords), archived_msgs, embedding_blob)
+            )
+            conn.commit()
+            archive_id = cur.lastrowid
+            log.info("Archived: %s (%d keywords, embedding=%s)",
+                     topic, len(keywords), embedding is not None)
+            return archive_id
+        except Exception as e:
+            log.error("archive_conversation failed: %s", e)
+            return None
 
 
 def search_archives(query: str, limit: int = 5) -> list[dict]:
@@ -509,14 +501,11 @@ def search_archives(query: str, limit: int = 5) -> list[dict]:
     if query_embedding is None:
         return []
 
-    conn = get_connection()
-    try:
+    with connection() as conn:
         rows = conn.execute(
             "SELECT id, topic, summary, keywords, created_at, embedding "
             "FROM archives WHERE embedding IS NOT NULL"
         ).fetchall()
-    finally:
-        conn.close()
 
     scored = []
     for r in rows:
@@ -554,7 +543,6 @@ def build_memory_context(query: str | None = None) -> str:
         sim_info = f" (relevanz: {f['similarity']})" if "similarity" in f else ""
         lines.append(f"{marker} [{f['category']}] {f['fact']}{sim_info}")
 
-    # Add relevant archives
     if query:
         archives = search_archives(query, limit=3)
         if archives:

@@ -1,10 +1,22 @@
+"""
+Kern-Jarvis V2 — LLM Abstraction Layer
+"""
 import logging
+import threading
+from collections.abc import Generator
 from pathlib import Path
+
 from kern.db import get_config
+from kern.exceptions import LLMError, ConfigError
 
 log = logging.getLogger(__name__)
 
 KERN_PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "kern.md"
+
+# ── Client Cache ─────────────────────────────────────────────────────────────
+
+_client_cache: dict[str, tuple[str, object]] = {}
+_client_lock = threading.Lock()
 
 
 def get_kern_prompt() -> str:
@@ -26,26 +38,46 @@ def build_system_prompt(memory_context: str = "", tools_manifest: str = "") -> s
     return kern
 
 
-def get_llm_client():
+def get_llm_client() -> tuple[str, object]:
+    """Get or create a cached LLM client for the configured provider."""
     provider = get_config("llm_provider", "anthropic")
     api_key = get_config("llm_api_key", "")
 
+    if not api_key:
+        raise ConfigError(
+            "Kein API-Key konfiguriert. Setze ihn mit: /config set llm_api_key <key>"
+        )
+
+    cache_key = f"{provider}:{api_key}"
+    with _client_lock:
+        if cache_key in _client_cache:
+            return _client_cache[cache_key]
+
     if provider == "anthropic":
         import anthropic
-        return ("anthropic", anthropic.Anthropic(api_key=api_key))
-
+        result = ("anthropic", anthropic.Anthropic(api_key=api_key))
     elif provider == "openai":
         import openai
-        return ("openai", openai.OpenAI(api_key=api_key))
-
+        result = ("openai", openai.OpenAI(api_key=api_key))
     elif provider == "openrouter":
         import openai
-        return ("openrouter", openai.OpenAI(
+        result = ("openrouter", openai.OpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
         ))
+    else:
+        raise ConfigError(f"Unbekannter Provider: {provider}")
 
-    raise ValueError(f"Unbekannter Provider: {provider}")
+    with _client_lock:
+        _client_cache[cache_key] = result
+
+    return result
+
+
+def invalidate_client_cache() -> None:
+    """Clear cached LLM clients (e.g. after config change)."""
+    with _client_lock:
+        _client_cache.clear()
 
 
 def get_model() -> str:
@@ -61,18 +93,13 @@ def get_model() -> str:
     return defaults.get(provider, "claude-opus-4-6")
 
 
-class LLMError(Exception):
-    """Fehler bei LLM-API-Aufrufen."""
-    pass
-
-
-def _extract_anthropic_text(response) -> str:
+def _extract_anthropic_text(response: object) -> str:
     if not response.content:
         raise LLMError("Leere Antwort vom LLM (kein Content)")
     return response.content[0].text
 
 
-def _extract_openai_text(response) -> str:
+def _extract_openai_text(response: object) -> str:
     if not response.choices:
         raise LLMError("Leere Antwort vom LLM (keine Choices)")
     return response.choices[0].message.content or ""
@@ -94,7 +121,7 @@ def memory_chat(prompt: str, system: str = "", max_tokens: int = 256) -> str:
             )
             return _extract_anthropic_text(response)
         else:
-            all_messages = []
+            all_messages: list[dict] = []
             if system:
                 all_messages.append({"role": "system", "content": system})
             all_messages.extend(messages)
@@ -125,7 +152,7 @@ def chat(messages: list[dict], system: str = "") -> str:
             )
             return _extract_anthropic_text(response)
         else:
-            all_messages = []
+            all_messages: list[dict] = []
             if system:
                 all_messages.append({"role": "system", "content": system})
             all_messages.extend(messages)
@@ -141,7 +168,7 @@ def chat(messages: list[dict], system: str = "") -> str:
         raise LLMError(f"LLM-Aufruf fehlgeschlagen ({type(e).__name__}): {e}") from e
 
 
-def chat_stream(messages: list[dict], system: str = ""):
+def chat_stream(messages: list[dict], system: str = "") -> Generator[str, None, None]:
     provider, client = get_llm_client()
     model = get_model()
 
@@ -155,9 +182,8 @@ def chat_stream(messages: list[dict], system: str = ""):
             ) as stream:
                 for text in stream.text_stream:
                     yield text
-
         else:
-            all_messages = []
+            all_messages: list[dict] = []
             if system:
                 all_messages.append({"role": "system", "content": system})
             all_messages.extend(messages)

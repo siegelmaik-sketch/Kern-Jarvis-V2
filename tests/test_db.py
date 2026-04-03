@@ -21,9 +21,43 @@ class TestInitDb:
 
     def test_idempotent(self, db_path):
         from kern.db import init_db
-        # Should not raise on second call
         init_db()
         init_db()
+
+    def test_wal_mode_enabled(self, db_path):
+        from kern.db import get_connection
+        conn = get_connection()
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        conn.close()
+        assert mode == "wal"
+
+    def test_foreign_keys_enabled(self, db_path):
+        from kern.db import get_connection
+        conn = get_connection()
+        fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.close()
+        assert fk == 1
+
+
+class TestConnectionContextManager:
+    def test_connection_closes_on_exit(self, db_path):
+        from kern.db import connection
+        with connection() as conn:
+            conn.execute("SELECT 1")
+        # Verify connection is closed
+        with pytest.raises(Exception):
+            conn.execute("SELECT 1")
+
+    def test_connection_closes_on_exception(self, db_path):
+        from kern.db import connection
+        conn_ref = None
+        with pytest.raises(ValueError):
+            with connection() as conn:
+                conn_ref = conn
+                raise ValueError("test error")
+        # Connection should still be closed
+        with pytest.raises(Exception):
+            conn_ref.execute("SELECT 1")
 
 
 class TestGetSetConfig:
@@ -44,12 +78,12 @@ class TestGetSetConfig:
         set_config("key", "v2")
         assert get_config("key") == "v2"
 
-    def test_connection_closed_on_error(self, db_path):
-        """Verify try/finally pattern works — connection is closed even on error."""
-        from kern.db import get_connection, get_config
-        # This should not leak connections
+    def test_many_sequential_reads(self, db_path):
+        """Verify connections are properly closed in a loop."""
+        from kern.db import get_config, set_config
+        set_config("loop_key", "value")
         for _ in range(100):
-            get_config("test")
+            assert get_config("loop_key") == "value"
 
 
 class TestIsConfigured:

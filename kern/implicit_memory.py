@@ -1,6 +1,6 @@
 """
 Kern-Jarvis Implicit Memory Extraction
-═══════════════════════════════════════
+=======================================
 Extrahiert nach einem Chat-Turn automatisch handlungsrelevante
 Informationen: Zusagen, Entscheidungen, TODOs, Follow-up-Bedarf.
 
@@ -12,17 +12,21 @@ Portiert von Kern-Jarvis V1 — synchron für SQLite.
 import json
 import logging
 import re
+import threading
 from datetime import datetime
 
-from kern.memory import save_fact, _parse_llm_json
+from kern.memory import save_fact, parse_llm_json
 
 log = logging.getLogger(__name__)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
 _MIN_CONVERSATION_LENGTH = 150
+_CONFIDENCE_THRESHOLD = 0.7
+_COOLDOWN_SECONDS = 120
+
 _last_extraction: datetime | None = None
-_COOLDOWN_SECONDS = 120  # höchstens alle 2 Minuten
+_extraction_lock = threading.Lock()
 
 # ── Extraction Prompt ────────────────────────────────────────────────────────
 
@@ -62,13 +66,12 @@ def extract_from_conversation(user_message: str, assistant_reply: str) -> list[d
         return []
 
     now = datetime.now()
-    if _last_extraction and (now - _last_extraction).total_seconds() < _COOLDOWN_SECONDS:
-        return []
+    with _extraction_lock:
+        if _last_extraction and (now - _last_extraction).total_seconds() < _COOLDOWN_SECONDS:
+            return []
 
     if user_message.startswith("[SYSTEM]"):
         return []
-
-    _last_extraction = now
 
     try:
         from kern.brain import memory_chat
@@ -79,7 +82,7 @@ def extract_from_conversation(user_message: str, assistant_reply: str) -> list[d
         )
 
         # Parse JSON — robust, handles ```json blocks and extra whitespace
-        parsed = _parse_llm_json(text)
+        parsed = parse_llm_json(text)
         if parsed is None:
             # Fallback: try to find a JSON array directly
             text = text.strip()
@@ -92,7 +95,7 @@ def extract_from_conversation(user_message: str, assistant_reply: str) -> list[d
                 log.debug("implicit_memory: JSON-Parsing fehlgeschlagen")
                 return []
 
-        # _parse_llm_json returns dict for objects, handle both
+        # parse_llm_json returns dict for objects, handle both
         if isinstance(parsed, dict):
             items = parsed.get("items", [parsed])
         elif isinstance(parsed, list):
@@ -104,19 +107,18 @@ def extract_from_conversation(user_message: str, assistant_reply: str) -> list[d
         valid_items = [
             item for item in items
             if isinstance(item, dict)
-            and item.get("confidence", 0) >= 0.7
+            and item.get("confidence", 0) >= _CONFIDENCE_THRESHOLD
             and item.get("content")
         ]
 
         if valid_items:
             _store_items(valid_items)
+            with _extraction_lock:
+                _last_extraction = datetime.now()
             log.info("implicit_memory: %d Items extrahiert", len(valid_items))
 
         return valid_items
 
-    except json.JSONDecodeError:
-        log.debug("implicit_memory: JSON-Parsing fehlgeschlagen")
-        return []
     except Exception as e:
         log.debug("implicit_memory: Extraktion fehlgeschlagen: %s", e)
         return []

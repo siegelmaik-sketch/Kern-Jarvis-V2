@@ -35,7 +35,7 @@ class TestPrintConfig:
         output = capsys.readouterr().out
         assert "Maik" in output
 
-    def test_api_key_masked(self, db_path, capsys):
+    def test_api_key_masked_on_display(self, db_path, capsys):
         from kern.db import set_config
         from kern.loop import print_config
         set_config("llm_api_key", "sk-ant-api03-verysecretkey123")
@@ -43,6 +43,29 @@ class TestPrintConfig:
         output = capsys.readouterr().out
         assert "verysecretkey123" not in output
         assert "***" in output
+
+    def test_api_key_masked_on_set(self, db_path, capsys):
+        """API key should be masked when echoing back after set."""
+        from kern.loop import print_config
+        print_config("set llm_api_key sk-ant-api03-secretkey789")
+        output = capsys.readouterr().out
+        assert "secretkey789" not in output
+        assert "***" in output
+
+    def test_api_key_masked_on_get(self, db_path, capsys):
+        from kern.db import set_config
+        from kern.loop import print_config
+        set_config("llm_api_key", "sk-ant-api03-verysecretkey123")
+        print_config("get llm_api_key")
+        output = capsys.readouterr().out
+        assert "verysecretkey123" not in output
+        assert "***" in output
+
+    def test_config_set_invalidates_client_cache(self, db_path, capsys):
+        from kern.loop import print_config
+        with patch("kern.loop.invalidate_client_cache") as mock_invalidate:
+            print_config("set llm_api_key test-key-12345")
+            mock_invalidate.assert_called_once()
 
 
 class TestPrintTools:
@@ -52,14 +75,23 @@ class TestPrintTools:
         output = capsys.readouterr().out
         assert "keine Tools" in output
 
-    def test_with_tools(self, db_path, capsys):
-        from kern.tools import register_tool
-        from kern.loop import print_tools
-        register_tool("btc", "Bitcoin Kurs", "/tools/btc.py")
-        print_tools()
-        output = capsys.readouterr().out
-        assert "btc" in output
-        assert "1 Tool" in output
+    def test_with_tools(self, db_path, capsys, tmp_path):
+        from kern.tools import register_tool, TOOLS_DIR
+        import kern.tools
+        old = kern.tools.TOOLS_DIR
+        kern.tools.TOOLS_DIR = tmp_path / "tools"
+        (tmp_path / "tools").mkdir()
+        try:
+            script = tmp_path / "tools" / "btc.py"
+            script.write_text("def main(args): pass\n")
+            register_tool("btc", "Bitcoin Kurs", str(script))
+            from kern.loop import print_tools
+            print_tools()
+            output = capsys.readouterr().out
+            assert "btc" in output
+            assert "1 Tool" in output
+        finally:
+            kern.tools.TOOLS_DIR = old
 
 
 class TestPrintMemory:
@@ -90,14 +122,14 @@ class TestPrintSearch:
         from kern.loop import print_search
         with patch("kern.memory._get_embedding", return_value=None):
             print_search("nonexistent")
-            # Falls back to get_facts which is empty
             output = capsys.readouterr().out
+            # Falls back to get_facts which is empty
+            assert "Keine Ergebnisse" in output or output.strip() == ""
 
 
 class TestBgMessages:
     def test_flush_empty_queue(self, capsys):
         from kern.loop import _flush_bg_messages, _bg_messages
-        # Clear queue
         while not _bg_messages.empty():
             _bg_messages.get_nowait()
         _flush_bg_messages()
@@ -106,7 +138,6 @@ class TestBgMessages:
 
     def test_flush_with_messages(self, capsys):
         from kern.loop import _flush_bg_messages, _bg_messages
-        # Clear queue
         while not _bg_messages.empty():
             _bg_messages.get_nowait()
         _bg_messages.put("  [Memory: 2 Fakt(en) gelernt]")
@@ -118,18 +149,19 @@ class TestBgMessages:
 
 
 class TestRunImplicitMemory:
-    def test_no_crash_on_error(self, db_path):
+    def test_logs_error_instead_of_silencing(self, db_path):
+        """Errors should be logged, not silenced with bare except:pass."""
         from kern.loop import _run_implicit_memory
-        with patch("kern.implicit_memory.extract_from_conversation", side_effect=Exception("boom")):
-            # Should not raise
-            _run_implicit_memory("test", "test")
+        with patch("kern.loop.extract_from_conversation", side_effect=Exception("boom")):
+            with patch("kern.loop.log") as mock_log:
+                _run_implicit_memory("test", "test")
+                mock_log.warning.assert_called_once()
 
     def test_queues_message_on_success(self, db_path, mock_embedding):
         from kern.loop import _run_implicit_memory, _bg_messages
 
         items = [{"type": "todo", "content": "Test", "confidence": 0.9, "importance": 7}]
         with patch("kern.loop.extract_from_conversation", return_value=items):
-            # Clear queue
             while not _bg_messages.empty():
                 _bg_messages.get_nowait()
             _run_implicit_memory("test " * 50, "response " * 50)

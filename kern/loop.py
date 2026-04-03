@@ -1,10 +1,12 @@
 """
 Kern-Loop — läuft ewig, kein Neustart nötig
 """
+import logging
 import queue
 import sys
 import threading
-from kern.brain import build_system_prompt, chat_stream
+
+from kern.brain import build_system_prompt, chat_stream, invalidate_client_cache
 from kern.memory import (
     build_memory_context, append_message, load_context, get_message_count,
     clear_messages, get_facts, update_conversation_topic,
@@ -13,6 +15,8 @@ from kern.tools import build_tools_manifest, list_tools
 from kern.tool_builder import parse_jarvis_commands, execute_commands
 from kern.implicit_memory import extract_from_conversation
 from kern.db import get_config, set_config
+
+log = logging.getLogger(__name__)
 
 # Queue für Nachrichten aus Background-Threads (thread-safe)
 _bg_messages: queue.Queue[str] = queue.Queue()
@@ -29,14 +33,14 @@ COMMANDS = {
 }
 
 
-def print_help():
+def print_help() -> None:
     print("\nBefehle:")
     for cmd, desc in COMMANDS.items():
         print(f"  {cmd:<12} {desc}")
     print()
 
 
-def print_tools():
+def print_tools() -> None:
     tools = list_tools()
     if not tools:
         print("\nNoch keine Tools registriert.\n")
@@ -47,7 +51,7 @@ def print_tools():
     print()
 
 
-def print_memory():
+def print_memory() -> None:
     facts = get_facts(limit=50)
     if not facts:
         print("\nMemory ist leer.\n")
@@ -66,8 +70,17 @@ _VALID_CONFIG_KEYS = {
     "embedding_api_key", "llm_api_key", "user_name", "language",
 }
 
+_SECRET_KEYS = {"llm_api_key", "embedding_api_key"}
 
-def print_config(args: str):
+
+def _mask_value(key: str, value: str) -> str:
+    """Mask sensitive config values for display."""
+    if key in _SECRET_KEYS and len(value) > 4:
+        return "***" + value[-4:]
+    return value
+
+
+def print_config(args: str) -> None:
     DISPLAY_KEYS = [
         "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
         "user_name", "language",
@@ -83,7 +96,7 @@ def print_config(args: str):
         print(f"  llm_api_key: {'***' + api[-4:] if len(api) > 4 else '(nicht gesetzt)'}")
         embed_api = get_config("embedding_api_key", "")
         print(f"  embedding_api_key: {'***' + embed_api[-4:] if len(embed_api) > 4 else '(nutzt llm_api_key)'}")
-        print(f"\nÄndern: /config set <key> <value>")
+        print("\nÄndern: /config set <key> <value>")
         print()
         return
 
@@ -94,15 +107,22 @@ def print_config(args: str):
             print(f"  Gültige Keys: {', '.join(sorted(_VALID_CONFIG_KEYS))}\n")
             return
         set_config(key, value)
-        print(f"  {key} → {value}\n")
+        # Invalidate client cache on provider/key changes
+        if key in ("llm_provider", "llm_api_key"):
+            invalidate_client_cache()
+        # Mask secret values in output
+        display_value = _mask_value(key, value)
+        print(f"  {key} -> {display_value}\n")
     elif parts[0] == "get" and len(parts) >= 2:
-        val = get_config(parts[1], "—")
-        print(f"  {parts[1]}: {val}\n")
+        key = parts[1]
+        val = get_config(key, "—")
+        display_val = _mask_value(key, val) if val != "—" else val
+        print(f"  {key}: {display_val}\n")
     else:
         print("Verwendung: /config set <key> <value> | /config get <key> | /config\n")
 
 
-def print_search(query: str):
+def print_search(query: str) -> None:
     from kern.memory import search_facts
     if not query:
         print("Verwendung: /search <suchbegriff>")
@@ -118,7 +138,7 @@ def print_search(query: str):
     print()
 
 
-def _flush_bg_messages():
+def _flush_bg_messages() -> None:
     """Print queued messages from background threads (call from main thread only)."""
     while not _bg_messages.empty():
         try:
@@ -128,17 +148,17 @@ def _flush_bg_messages():
             break
 
 
-def _run_implicit_memory(user_input: str, response: str):
+def _run_implicit_memory(user_input: str, response: str) -> None:
     """Run implicit memory extraction in background thread."""
     try:
         items = extract_from_conversation(user_input, response)
         if items:
             _bg_messages.put(f"  [Memory: {len(items)} Fakt(en) gelernt]")
-    except Exception:
-        pass  # never crash the loop
+    except Exception as e:
+        log.warning("Implicit memory extraction failed: %s", e)
 
 
-def run_loop():
+def run_loop() -> None:
     name = get_config("user_name", "Du")
     msg_count = get_message_count()
 
@@ -146,11 +166,10 @@ def run_loop():
     print("Tippe /hilfe für Befehle oder stelle direkt eine Frage.\n")
 
     while True:
-        # Background-Nachrichten ausgeben bevor der User tippt
         _flush_bg_messages()
 
         try:
-            user_input = input(f"{name} → ").strip()
+            user_input = input(f"{name} -> ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n\nJarvis beendet.")
             sys.exit(0)
@@ -182,7 +201,7 @@ def run_loop():
             print("Nachrichtenverlauf gelöscht. Facts bleiben erhalten.\n")
             continue
 
-        # Nachricht persistent speichern (append-only, nie gelöscht)
+        # Nachricht persistent speichern (append-only)
         append_message({"role": "user", "content": user_input})
 
         # System-Prompt dynamisch aufbauen — mit semantischer Suche
@@ -197,22 +216,29 @@ def run_loop():
         update_conversation_topic(history)
 
         # LLM aufrufen (streaming)
-        print(f"\nJarvis → ", end="", flush=True)
-        full_response = ""
+        print("\nJarvis -> ", end="", flush=True)
+        chunks: list[str] = []
         stream_ok = False
 
         try:
             for chunk in chat_stream(history, system=system):
                 print(chunk, end="", flush=True)
-                full_response += chunk
+                chunks.append(chunk)
             stream_ok = True
         except Exception as e:
+            log.error("Stream failed: %s", e)
             print(f"\n[Fehler: {e}]")
 
         print("\n")
 
-        # Nur vollständige Antworten speichern
+        full_response = "".join(chunks)
+
         if not stream_ok or not full_response.strip():
+            # Save error marker to prevent orphaned user message
+            append_message({
+                "role": "assistant",
+                "content": "[Fehler: Antwort konnte nicht generiert werden]",
+            })
             continue
 
         append_message({"role": "assistant", "content": full_response})
@@ -221,6 +247,7 @@ def run_loop():
         commands = parse_jarvis_commands(full_response)
         if commands:
             results = execute_commands(commands)
+            result_parts: list[str] = []
             for r in results:
                 if r.get("success"):
                     if "tool_name" in r:
@@ -229,9 +256,18 @@ def run_loop():
                         print(f"  [Tool registriert: {r['registered']}]")
                     elif "result" in r:
                         print(f"  [Tool-Ergebnis: {r['result']}]")
+                        result_parts.append(str(r["result"]))
                 else:
                     if r.get("error"):
                         print(f"  [Fehler: {r['error']}]")
+                        result_parts.append(f"Fehler: {r['error']}")
+
+            # Persist tool results so LLM sees them next turn
+            if result_parts:
+                append_message({
+                    "role": "assistant",
+                    "content": "[Tool-Ergebnisse]\n" + "\n".join(result_parts),
+                })
 
         # Implicit Memory: im Hintergrund Fakten extrahieren
         t = threading.Thread(
