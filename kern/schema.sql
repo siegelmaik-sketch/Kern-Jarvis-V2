@@ -6,15 +6,51 @@ CREATE TABLE IF NOT EXISTS config (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS memory (
+-- ── Facts: persistent knowledge with quality gate ──────────────────────────
+CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL CHECK(type IN ('user', 'feedback', 'project', 'reference')),
-    key TEXT NOT NULL UNIQUE,
-    value TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    category TEXT NOT NULL DEFAULT 'general',
+    fact TEXT NOT NULL UNIQUE,
+    importance INTEGER DEFAULT 5,
+    source TEXT DEFAULT 'user',
+    embedding BLOB,
+    access_count INTEGER DEFAULT 0,
+    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_facts_importance ON facts(importance DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
+
+-- ── Messages: append-only, untruncated ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_calls TEXT,
+    tool_call_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
+
+-- ── Archives: conversation summaries with embeddings ───────────────────────
+CREATE TABLE IF NOT EXISTS archives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    keywords TEXT NOT NULL DEFAULT '[]',
+    messages TEXT,
+    embedding BLOB,
+    decisions TEXT NOT NULL DEFAULT '[]',
+    period_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    period_end TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_archives_created ON archives(created_at DESC);
+
+-- ── Tools ──────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS tools (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -25,24 +61,7 @@ CREATE TABLE IF NOT EXISTS tools (
     last_used_at TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system', 'tool')),
-    content TEXT NOT NULL,
-    tool_name TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS manifest_entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    entry_type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    active INTEGER DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(type);
-CREATE INDEX IF NOT EXISTS idx_memory_key ON memory(key);
-CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
 CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(name);
+
+-- ── Config ─────────────────────────────────────────────────────────────────
+-- (already defined above)

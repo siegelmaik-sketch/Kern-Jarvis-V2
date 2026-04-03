@@ -2,11 +2,16 @@
 Kern-Loop — läuft ewig, kein Neustart nötig
 """
 import sys
+import threading
 from kern.brain import build_system_prompt, chat_stream
-from kern.memory import build_memory_context, memory_save, memory_get
+from kern.memory import (
+    build_memory_context, append_message, load_context, get_message_count,
+    clear_messages, get_facts, get_relevant_facts, save_fact,
+    update_conversation_topic,
+)
 from kern.tools import build_tools_manifest, run_tool, list_tools
 from kern.tool_builder import parse_jarvis_commands, execute_commands
-from kern.session import new_session, save_message, get_history
+from kern.implicit_memory import extract_from_conversation
 from kern.db import get_config
 
 
@@ -14,7 +19,8 @@ COMMANDS = {
     "/hilfe":   "Zeigt diese Hilfe",
     "/tools":   "Zeigt alle registrierten Tools",
     "/memory":  "Zeigt den aktuellen Memory-Inhalt",
-    "/reset":   "Startet eine neue Session (kein Memory-Verlust)",
+    "/search":  "Semantische Suche in der Memory (z.B. /search Bitcoin)",
+    "/reset":   "Löscht den Nachrichtenverlauf (Facts bleiben erhalten)",
     "/exit":    "Beendet Jarvis",
 }
 
@@ -38,27 +44,51 @@ def print_tools():
 
 
 def print_memory():
-    from kern.memory import memory_all
-    entries = memory_all()
-    if not entries:
+    facts = get_facts(limit=50)
+    if not facts:
         print("\nMemory ist leer.\n")
         return
-    print(f"\n{len(entries)} Memory-Einträge:")
-    for e in entries:
-        print(f"  [{e['type']}] {e['key']}: {e['value']}")
+    print(f"\n{len(facts)} Fakt(en) in der Memory:")
+    for f in facts:
+        imp = f.get("importance", 5)
+        marker = "★" if imp >= 8 else "●" if imp >= 5 else "○"
+        print(f"  {marker} [{f['category']}] {f['fact']} (imp={imp}, src={f.get('source', '?')})")
+    print(f"\n  Nachrichten gesamt: {get_message_count()}")
     print()
 
 
-def get_prompt_prefix() -> str:
-    name = get_config("user_name", "Du")
-    return f"{name}"
+def print_search(query: str):
+    from kern.memory import search_facts
+    if not query:
+        print("Verwendung: /search <suchbegriff>")
+        return
+    results = search_facts(query, limit=10)
+    if not results:
+        print(f"\nKeine Ergebnisse für '{query}'.\n")
+        return
+    print(f"\n{len(results)} Ergebnis(se) für '{query}':")
+    for f in results:
+        sim = f.get("similarity", 0)
+        print(f"  [{sim:.1%}] [{f['category']}] {f['fact']}")
+    print()
+
+
+def _run_implicit_memory(user_input: str, response: str):
+    """Run implicit memory extraction in background thread."""
+    try:
+        items = extract_from_conversation(user_input, response)
+        if items:
+            labels = [f"[{i.get('type', '?')}] {i.get('content', '')[:40]}" for i in items]
+            print(f"  [Memory: {len(items)} Fakt(en) gelernt]")
+    except Exception:
+        pass  # never crash the loop
 
 
 def run_loop():
-    session_id = new_session()
     name = get_config("user_name", "Du")
+    msg_count = get_message_count()
 
-    print(f"\nJarvis bereit. Session: {session_id[:8]}...")
+    print(f"\nJarvis bereit. {msg_count} Nachrichten im Langzeitgedächtnis.")
     print("Tippe /hilfe für Befehle oder stelle direkt eine Frage.\n")
 
     while True:
@@ -84,21 +114,27 @@ def run_loop():
         elif user_input == "/memory":
             print_memory()
             continue
+        elif user_input.startswith("/search"):
+            print_search(user_input[7:].strip())
+            continue
         elif user_input == "/reset":
-            session_id = new_session()
-            print(f"Neue Session: {session_id[:8]}...\n")
+            clear_messages()
+            print("Nachrichtenverlauf gelöscht. Facts bleiben erhalten.\n")
             continue
 
-        # Nachricht speichern
-        save_message(session_id, "user", user_input)
+        # Nachricht persistent speichern (append-only, nie gelöscht)
+        append_message({"role": "user", "content": user_input})
 
-        # System-Prompt dynamisch aufbauen
-        memory_ctx = build_memory_context()
+        # System-Prompt dynamisch aufbauen — mit semantischer Suche
+        memory_ctx = build_memory_context(query=user_input)
         tools_manifest = build_tools_manifest()
         system = build_system_prompt(memory_ctx, tools_manifest)
 
-        # Conversation History
-        history = get_history(session_id)
+        # Letzte Nachrichten als Kontext laden
+        history = load_context()
+
+        # Topic-Tracker updaten
+        update_conversation_topic(history)
 
         # LLM aufrufen (streaming)
         print(f"\nJarvis → ", end="", flush=True)
@@ -114,8 +150,8 @@ def run_loop():
 
         print("\n")
 
-        # Antwort speichern
-        save_message(session_id, "assistant", full_response)
+        # Antwort persistent speichern
+        append_message({"role": "assistant", "content": full_response})
 
         # Jarvis-Befehle in der Antwort ausführen
         commands = parse_jarvis_commands(full_response)
@@ -124,13 +160,19 @@ def run_loop():
             for r in results:
                 if r.get("success"):
                     if "tool_name" in r:
-                        print(f"[Tool gebaut: {r['tool_name']}]")
+                        print(f"  [Tool gebaut: {r['tool_name']}]")
                     elif "registered" in r:
-                        print(f"[Tool registriert: {r['registered']}]")
-                    elif "saved" in r:
-                        pass  # Memory-Saves still im Hintergrund
+                        print(f"  [Tool registriert: {r['registered']}]")
                     elif "result" in r:
-                        print(f"[Tool-Ergebnis: {r['result']}]")
+                        print(f"  [Tool-Ergebnis: {r['result']}]")
                 else:
                     if r.get("error"):
-                        print(f"[Fehler: {r['error']}]")
+                        print(f"  [Fehler: {r['error']}]")
+
+        # Implicit Memory: im Hintergrund Fakten extrahieren
+        t = threading.Thread(
+            target=_run_implicit_memory,
+            args=(user_input, full_response),
+            daemon=True
+        )
+        t.start()
