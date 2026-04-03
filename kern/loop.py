@@ -1,18 +1,21 @@
 """
 Kern-Loop — läuft ewig, kein Neustart nötig
 """
+import queue
 import sys
 import threading
 from kern.brain import build_system_prompt, chat_stream
 from kern.memory import (
     build_memory_context, append_message, load_context, get_message_count,
-    clear_messages, get_facts, get_relevant_facts, save_fact,
-    update_conversation_topic,
+    clear_messages, get_facts, update_conversation_topic,
 )
-from kern.tools import build_tools_manifest, run_tool, list_tools
+from kern.tools import build_tools_manifest, list_tools
 from kern.tool_builder import parse_jarvis_commands, execute_commands
 from kern.implicit_memory import extract_from_conversation
 from kern.db import get_config, set_config
+
+# Queue für Nachrichten aus Background-Threads (thread-safe)
+_bg_messages: queue.Queue[str] = queue.Queue()
 
 
 COMMANDS = {
@@ -58,8 +61,14 @@ def print_memory():
     print()
 
 
+_VALID_CONFIG_KEYS = {
+    "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
+    "embedding_api_key", "llm_api_key", "user_name", "language",
+}
+
+
 def print_config(args: str):
-    CONFIG_KEYS = [
+    DISPLAY_KEYS = [
         "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
         "user_name", "language",
     ]
@@ -67,17 +76,23 @@ def print_config(args: str):
 
     if not parts or parts[0] not in ("set", "get"):
         print("\nAktuelle Konfiguration:")
-        for key in CONFIG_KEYS:
+        for key in DISPLAY_KEYS:
             val = get_config(key, "—")
             print(f"  {key}: {val}")
         api = get_config("llm_api_key", "")
         print(f"  llm_api_key: {'***' + api[-4:] if len(api) > 4 else '(nicht gesetzt)'}")
+        embed_api = get_config("embedding_api_key", "")
+        print(f"  embedding_api_key: {'***' + embed_api[-4:] if len(embed_api) > 4 else '(nutzt llm_api_key)'}")
         print(f"\nÄndern: /config set <key> <value>")
         print()
         return
 
     if parts[0] == "set" and len(parts) == 3:
         key, value = parts[1], parts[2]
+        if key not in _VALID_CONFIG_KEYS:
+            print(f"  Unbekannter Key: '{key}'")
+            print(f"  Gültige Keys: {', '.join(sorted(_VALID_CONFIG_KEYS))}\n")
+            return
         set_config(key, value)
         print(f"  {key} → {value}\n")
     elif parts[0] == "get" and len(parts) >= 2:
@@ -103,13 +118,22 @@ def print_search(query: str):
     print()
 
 
+def _flush_bg_messages():
+    """Print queued messages from background threads (call from main thread only)."""
+    while not _bg_messages.empty():
+        try:
+            msg = _bg_messages.get_nowait()
+            print(msg)
+        except queue.Empty:
+            break
+
+
 def _run_implicit_memory(user_input: str, response: str):
     """Run implicit memory extraction in background thread."""
     try:
         items = extract_from_conversation(user_input, response)
         if items:
-            labels = [f"[{i.get('type', '?')}] {i.get('content', '')[:40]}" for i in items]
-            print(f"  [Memory: {len(items)} Fakt(en) gelernt]")
+            _bg_messages.put(f"  [Memory: {len(items)} Fakt(en) gelernt]")
     except Exception:
         pass  # never crash the loop
 
@@ -122,6 +146,9 @@ def run_loop():
     print("Tippe /hilfe für Befehle oder stelle direkt eine Frage.\n")
 
     while True:
+        # Background-Nachrichten ausgeben bevor der User tippt
+        _flush_bg_messages()
+
         try:
             user_input = input(f"{name} → ").strip()
         except (KeyboardInterrupt, EOFError):
@@ -172,18 +199,22 @@ def run_loop():
         # LLM aufrufen (streaming)
         print(f"\nJarvis → ", end="", flush=True)
         full_response = ""
+        stream_ok = False
 
         try:
             for chunk in chat_stream(history, system=system):
                 print(chunk, end="", flush=True)
                 full_response += chunk
+            stream_ok = True
         except Exception as e:
             print(f"\n[Fehler: {e}]")
-            continue
 
         print("\n")
 
-        # Antwort persistent speichern
+        # Nur vollständige Antworten speichern
+        if not stream_ok or not full_response.strip():
+            continue
+
         append_message({"role": "assistant", "content": full_response})
 
         # Jarvis-Befehle in der Antwort ausführen

@@ -15,8 +15,8 @@ Cosine similarity via numpy (no pgvector needed).
 import json
 import logging
 import re
+import threading
 from datetime import datetime
-from typing import Any
 
 import httpx
 import numpy as np
@@ -30,36 +30,26 @@ log = logging.getLogger(__name__)
 CONTEXT_MAX_MESSAGES = 20
 EMBEDDING_DIMS = 1024
 
-# Defaults — werden von Config überschrieben wenn gesetzt
-_DEFAULT_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
-_DEFAULT_MEMORY_LLM_MODEL = "google/gemini-2.5-flash"
-
-
-def get_embedding_model() -> str:
-    return get_config("embedding_model", _DEFAULT_EMBEDDING_MODEL)
-
-
-def get_memory_llm_model() -> str:
-    return get_config("memory_llm_model", _DEFAULT_MEMORY_LLM_MODEL)
-
 # ── Embedding Client ─────────────────────────────────────────────────────────
 
 _embed_client: httpx.Client | None = None
+_embed_lock = threading.Lock()
 
 
 def _get_embed_client() -> httpx.Client:
     global _embed_client
-    if _embed_client is not None and not _embed_client.is_closed:
+    with _embed_lock:
+        if _embed_client is not None and not _embed_client.is_closed:
+            return _embed_client
+        api_key = get_config("embedding_api_key") or get_config("llm_api_key", "")
+        _embed_client = httpx.Client(
+            timeout=30,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
         return _embed_client
-    api_key = get_config("llm_api_key", "")
-    _embed_client = httpx.Client(
-        timeout=30,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
-    return _embed_client
 
 
 def _get_embedding(text: str) -> np.ndarray | None:
@@ -67,10 +57,11 @@ def _get_embedding(text: str) -> np.ndarray | None:
         return None
     try:
         client = _get_embed_client()
+        model = get_config("embedding_model", "qwen/qwen3-embedding-8b")
         r = client.post(
             "https://openrouter.ai/api/v1/embeddings",
             json={
-                "model": get_embedding_model(),
+                "model": model,
                 "input": text[:8000],
                 "dimensions": EMBEDDING_DIMS,
             },
@@ -94,11 +85,16 @@ def _blob_to_embedding(blob: bytes) -> np.ndarray:
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    if a.shape != b.shape:
+        return 0.0
     dot = np.dot(a, b)
     norm = np.linalg.norm(a) * np.linalg.norm(b)
-    if norm == 0:
+    if norm == 0 or not np.isfinite(norm):
         return 0.0
-    return float(dot / norm)
+    result = float(dot / norm)
+    if not np.isfinite(result):
+        return 0.0
+    return result
 
 
 # ── Messages: Append + Load ─────────────────────────────────────────────────
@@ -106,16 +102,18 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 def append_message(msg: dict) -> None:
     """Append a single message to persistent storage. No truncation."""
     conn = get_connection()
-    role = msg.get("role", "user")
-    content = msg.get("content")
-    tool_calls = msg.get("tool_calls")
-    tool_call_id = msg.get("tool_call_id")
-    conn.execute(
-        "INSERT INTO messages (role, content, tool_calls, tool_call_id) VALUES (?, ?, ?, ?)",
-        (role, content, json.dumps(tool_calls) if tool_calls else None, tool_call_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        role = msg.get("role", "user")
+        content = msg.get("content")
+        tool_calls = msg.get("tool_calls")
+        tool_call_id = msg.get("tool_call_id")
+        conn.execute(
+            "INSERT INTO messages (role, content, tool_calls, tool_call_id) VALUES (?, ?, ?, ?)",
+            (role, content, json.dumps(tool_calls) if tool_calls else None, tool_call_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
@@ -123,12 +121,14 @@ def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
     Returns messages in chronological order (oldest first).
     """
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT role, content, tool_calls, tool_call_id FROM messages "
-        "ORDER BY id DESC LIMIT ?",
-        (max_messages + 10,)
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT role, content, tool_calls, tool_call_id FROM messages "
+            "ORDER BY id DESC LIMIT ?",
+            (max_messages,)
+        ).fetchall()
+    finally:
+        conn.close()
 
     if not rows:
         return []
@@ -144,23 +144,26 @@ def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
             msg["tool_call_id"] = r["tool_call_id"]
         msgs.append(msg)
 
-    msgs = msgs[:max_messages]
     msgs.reverse()
     return msgs
 
 
 def get_message_count() -> int:
     conn = get_connection()
-    count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-    conn.close()
+    try:
+        count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+    finally:
+        conn.close()
     return count
 
 
 def clear_messages() -> None:
     conn = get_connection()
-    conn.execute("DELETE FROM messages")
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM messages")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ── Fact Quality Gate ────────────────────────────────────────────────────────
@@ -170,35 +173,25 @@ def _gate_fact(fact: str, category: str) -> tuple[bool, int]:
     Returns (should_save, importance_score).
     """
     try:
-        client = _get_embed_client()
-        r = client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            json={
-                "model": get_memory_llm_model(),
-                "messages": [{"role": "user", "content": (
-                    'Rate this fact for long-term storage. Answer ONLY with JSON: '
-                    '{"save": true/false, "importance": 1-10}\n\n'
-                    'Rules:\n'
-                    '- SAVE: personal info, contacts, addresses, phone numbers, decisions, '
-                    'solutions to real bugs, architecture decisions, user preferences, '
-                    'important dates, real errors with root causes\n'
-                    '- DISCARD: agent status updates, general knowledge, Wikipedia-level info, '
-                    'task progress, implementation details\n\n'
-                    f'Fact: "{fact}"\nCategory: {category}'
-                )}],
-                "max_tokens": 50,
-                "temperature": 0,
-            },
-            timeout=15,
+        from kern.brain import memory_chat
+        text = memory_chat(
+            prompt=(
+                'Rate this fact for long-term storage. Answer ONLY with JSON: '
+                '{"save": true/false, "importance": 1-10}\n\n'
+                'Rules:\n'
+                '- SAVE: personal info, contacts, addresses, phone numbers, decisions, '
+                'solutions to real bugs, architecture decisions, user preferences, '
+                'important dates, real errors with root causes\n'
+                '- DISCARD: agent status updates, general knowledge, Wikipedia-level info, '
+                'task progress, implementation details\n\n'
+                f'Fact: "{fact}"\nCategory: {category}'
+            ),
+            max_tokens=50,
         )
-        r.raise_for_status()
-        data = r.json()
-        text = data["choices"][0]["message"]["content"].strip()
         parsed = _parse_llm_json(text)
         if parsed and "save" in parsed:
             return bool(parsed["save"]), int(parsed.get("importance", 5))
-    except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError,
-            KeyError, IndexError) as e:
+    except Exception as e:
         log.warning("Fact gate failed, allowing fact: %s", e)
     return True, 5
 
@@ -247,14 +240,14 @@ def save_fact(
 
     conn = get_connection()
     try:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO facts (category, fact, source, importance, embedding) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(fact) DO NOTHING",
             (category, fact, source, importance, embedding_blob)
         )
         conn.commit()
-        saved = conn.total_changes > 0
+        saved = cur.rowcount > 0
         if saved:
             log.info("Fact saved [%s/%s/imp=%d]: %s", source, category, importance, fact[:80])
         return saved
@@ -265,123 +258,130 @@ def save_fact(
         conn.close()
 
 
+def memory_save(memory_type: str, key: str, value: str) -> bool:
+    """Wrapper for MEMORY_SAVE commands from LLM responses."""
+    category_map = {
+        "user": "preference",
+        "feedback": "feedback",
+        "project": "project",
+        "reference": "reference",
+    }
+    category = category_map.get(memory_type, "general")
+    fact_text = f"[{key}] {value}"
+    return save_fact(fact=fact_text, category=category, source="jarvis", importance=7)
+
+
 def get_facts(limit: int = 25) -> list[dict]:
     """Get facts ordered by importance then recency."""
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, category, fact, importance, source, created_at, last_accessed "
-        "FROM facts ORDER BY importance DESC, created_at DESC LIMIT ?",
-        (limit,)
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT id, category, fact, importance, source, created_at, last_accessed "
+            "FROM facts ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+    finally:
+        conn.close()
     return [dict(r) for r in rows]
 
 
 def delete_fact(fact_id: int) -> bool:
     conn = get_connection()
-    cur = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        conn.commit()
+    finally:
+        conn.close()
     return cur.rowcount > 0
+
+
+def search_fact_by_key(key: str) -> list[dict]:
+    """Search facts by key prefix (for MEMORY_GET)."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT id, category, fact, importance, source, created_at, last_accessed "
+            "FROM facts WHERE fact LIKE ?",
+            (f"[{key}]%",)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 # ── Smart Fact Retrieval (3-Tier wie V1) ─────────────────────────────────────
 
-_STOP_WORDS = {
-    "der", "die", "das", "ein", "eine", "und", "oder", "aber", "ist", "sind",
-    "war", "hat", "haben", "wird", "werden", "kann", "können", "soll", "mit",
-    "von", "zu", "auf", "für", "in", "an", "bei", "nach", "über", "aus",
-    "wie", "was", "wer", "wo", "wann", "nicht", "noch", "auch", "nur",
-    "schon", "mal", "dann", "wenn", "als", "ich", "du", "er", "sie", "es",
-    "wir", "ihr", "mein", "dein", "sein", "den", "dem", "des", "im", "am",
-    "um", "ob", "so", "da", "hier", "dort", "jetzt", "heute", "gestern",
-    "morgen", "bitte", "danke", "ja", "nein", "the", "is", "are", "was",
-    "a", "an", "and", "or", "but", "for", "to", "of", "in", "on", "at",
-    "hast", "hab", "mach", "mir", "mich", "dir", "dich", "uns", "euch",
-}
-
-
-def _extract_search_keywords(text: str) -> list[str]:
-    words = re.findall(r"[a-zA-ZäöüÄÖÜß]{3,}", text.lower())
-    keywords = [w for w in words if w not in _STOP_WORDS]
-    seen = set()
-    unique = []
-    for w in keywords:
-        if w not in seen:
-            seen.add(w)
-            unique.append(w)
-    return unique[:10]
-
-
 def get_relevant_facts(query: str | None = None, limit: int = 15) -> list[dict]:
     """Smart fact retrieval: always-load + semantic + recency tiers."""
     conn = get_connection()
-    collected: list[dict] = []
-    seen_ids: set[int] = set()
+    try:
+        collected: list[dict] = []
+        seen_ids: set[int] = set()
 
-    # Tier 1: Always-load (preference + system, high importance)
-    always_rows = conn.execute(
-        "SELECT id, category, fact, importance, source, created_at, last_accessed "
-        "FROM facts WHERE category IN ('preference', 'system') "
-        "ORDER BY importance DESC, created_at DESC LIMIT 5"
-    ).fetchall()
-    for r in always_rows:
-        if r["id"] not in seen_ids:
-            collected.append(dict(r))
-            seen_ids.add(r["id"])
-
-    # Tier 2: Semantic search (embeddings + cosine similarity)
-    if query and len(collected) < limit:
-        query_embedding = _get_embedding(query)
-        if query_embedding is not None:
-            all_with_emb = conn.execute(
-                "SELECT id, category, fact, importance, source, created_at, last_accessed, embedding "
-                "FROM facts WHERE embedding IS NOT NULL"
-            ).fetchall()
-
-            scored = []
-            for r in all_with_emb:
-                if r["id"] in seen_ids:
-                    continue
-                fact_embedding = _blob_to_embedding(r["embedding"])
-                sim = _cosine_similarity(query_embedding, fact_embedding)
-                if sim >= 0.2:
-                    d = dict(r)
-                    del d["embedding"]
-                    d["similarity"] = round(sim, 3)
-                    scored.append(d)
-
-            scored.sort(key=lambda x: x["similarity"], reverse=True)
-            for d in scored[:limit - len(collected)]:
-                collected.append(d)
-                seen_ids.add(d["id"])
-
-    # Tier 3: Recent high-importance facts
-    if len(collected) < limit:
-        rec_rows = conn.execute(
+        # Tier 1: Always-load (preference + system, high importance)
+        always_rows = conn.execute(
             "SELECT id, category, fact, importance, source, created_at, last_accessed "
-            "FROM facts WHERE importance >= 7 "
-            "ORDER BY created_at DESC LIMIT ?",
-            (limit - len(collected) + 5,)
+            "FROM facts WHERE category IN ('preference', 'system') "
+            "ORDER BY importance DESC, created_at DESC LIMIT 5"
         ).fetchall()
-        for r in rec_rows:
+        for r in always_rows:
             if r["id"] not in seen_ids:
                 collected.append(dict(r))
                 seen_ids.add(r["id"])
-                if len(collected) >= limit:
-                    break
 
-    # Update access tracking
-    if seen_ids:
-        placeholders = ",".join("?" * len(seen_ids))
-        conn.execute(
-            f"UPDATE facts SET last_accessed = CURRENT_TIMESTAMP, "
-            f"access_count = access_count + 1 WHERE id IN ({placeholders})",
-            list(seen_ids)
-        )
-        conn.commit()
+        # Tier 2: Semantic search (embeddings + cosine similarity)
+        if query and len(collected) < limit:
+            query_embedding = _get_embedding(query)
+            if query_embedding is not None:
+                all_with_emb = conn.execute(
+                    "SELECT id, category, fact, importance, source, created_at, last_accessed, embedding "
+                    "FROM facts WHERE embedding IS NOT NULL"
+                ).fetchall()
 
-    conn.close()
+                scored = []
+                for r in all_with_emb:
+                    if r["id"] in seen_ids:
+                        continue
+                    fact_embedding = _blob_to_embedding(r["embedding"])
+                    sim = _cosine_similarity(query_embedding, fact_embedding)
+                    if sim >= 0.2:
+                        d = dict(r)
+                        del d["embedding"]
+                        d["similarity"] = round(sim, 3)
+                        scored.append(d)
+
+                scored.sort(key=lambda x: x["similarity"], reverse=True)
+                for d in scored[:limit - len(collected)]:
+                    collected.append(d)
+                    seen_ids.add(d["id"])
+
+        # Tier 3: Recent high-importance facts
+        if len(collected) < limit:
+            rec_rows = conn.execute(
+                "SELECT id, category, fact, importance, source, created_at, last_accessed "
+                "FROM facts WHERE importance >= 7 "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit - len(collected) + 5,)
+            ).fetchall()
+            for r in rec_rows:
+                if r["id"] not in seen_ids:
+                    collected.append(dict(r))
+                    seen_ids.add(r["id"])
+                    if len(collected) >= limit:
+                        break
+
+        # Update access tracking
+        if seen_ids:
+            placeholders = ",".join("?" * len(seen_ids))
+            conn.execute(
+                f"UPDATE facts SET last_accessed = CURRENT_TIMESTAMP, "
+                f"access_count = access_count + 1 WHERE id IN ({placeholders})",
+                list(seen_ids)
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
     return collected[:limit]
 
 
@@ -392,11 +392,13 @@ def search_facts(query: str, limit: int = 20) -> list[dict]:
         return get_facts(limit)
 
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, category, fact, importance, source, created_at, last_accessed, embedding "
-        "FROM facts WHERE embedding IS NOT NULL"
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT id, category, fact, importance, source, created_at, last_accessed, embedding "
+            "FROM facts WHERE embedding IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
 
     scored = []
     for r in rows:
@@ -417,15 +419,17 @@ _conversation_topic: str = ""
 _topic_keywords: list[str] = []
 _topic_message_count: int = 0
 _TOPIC_UPDATE_INTERVAL = 5
+_topic_lock = threading.Lock()
 
 
 def update_conversation_topic(recent_messages: list[dict]) -> None:
     """Update current conversation topic from recent messages."""
     global _conversation_topic, _topic_keywords, _topic_message_count
 
-    _topic_message_count += 1
-    if _topic_message_count % _TOPIC_UPDATE_INTERVAL != 0:
-        return
+    with _topic_lock:
+        _topic_message_count += 1
+        if _topic_message_count % _TOPIC_UPDATE_INTERVAL != 0:
+            return
 
     user_msgs = [
         m.get("content", "")[:200]
@@ -438,40 +442,32 @@ def update_conversation_topic(recent_messages: list[dict]) -> None:
 
     text = "\n".join(user_msgs)
     try:
-        client = _get_embed_client()
-        r = client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            json={
-                "model": get_memory_llm_model(),
-                "messages": [{"role": "user", "content": (
-                    "What is the current topic of this conversation? "
-                    "Answer in max 10 words German. "
-                    "Also list 3-5 keywords.\n"
-                    "Format: TOPIC: ...\nKEYWORDS: kw1, kw2, kw3\n\n"
-                    f"Recent messages:\n{text}"
-                )}],
-                "max_tokens": 60,
-                "temperature": 0,
-            },
-            timeout=10,
+        from kern.brain import memory_chat
+        result = memory_chat(
+            prompt=(
+                "What is the current topic of this conversation? "
+                "Answer in max 10 words German. "
+                "Also list 3-5 keywords.\n"
+                "Format: TOPIC: ...\nKEYWORDS: kw1, kw2, kw3\n\n"
+                f"Recent messages:\n{text}"
+            ),
+            max_tokens=60,
         )
-        r.raise_for_status()
-        data = r.json()
-        result = data["choices"][0]["message"]["content"].strip()
-        for line in result.split("\n"):
-            line = line.strip()
-            if line.upper().startswith("TOPIC:"):
-                _conversation_topic = line[6:].strip()
-            elif line.upper().startswith("KEYWORDS:"):
-                _topic_keywords = [k.strip() for k in line[9:].split(",") if k.strip()]
+        with _topic_lock:
+            for line in result.split("\n"):
+                line = line.strip()
+                if line.upper().startswith("TOPIC:"):
+                    _conversation_topic = line[6:].strip()
+                elif line.upper().startswith("KEYWORDS:"):
+                    _topic_keywords = [k.strip() for k in line[9:].split(",") if k.strip()]
         log.debug("Topic: %s | Keywords: %s", _conversation_topic, _topic_keywords)
-    except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError,
-            KeyError, IndexError) as e:
+    except Exception as e:
         log.debug("Topic update failed: %s", e)
 
 
 def get_conversation_topic() -> str:
-    return _conversation_topic
+    with _topic_lock:
+        return _conversation_topic
 
 
 # ── Conversation Archive ────────────────────────────────────────────────────
@@ -514,11 +510,13 @@ def search_archives(query: str, limit: int = 5) -> list[dict]:
         return []
 
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, topic, summary, keywords, created_at, embedding "
-        "FROM archives WHERE embedding IS NOT NULL"
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT id, topic, summary, keywords, created_at, embedding "
+            "FROM archives WHERE embedding IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
 
     scored = []
     for r in rows:

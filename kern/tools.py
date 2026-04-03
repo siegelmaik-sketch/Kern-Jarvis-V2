@@ -9,27 +9,33 @@ TOOLS_DIR = Path(__file__).parent.parent / "tools"
 
 def register_tool(name: str, description: str, script_path: str) -> bool:
     conn = get_connection()
-    conn.execute(
-        "INSERT INTO tools (name, description, script_path) VALUES (?, ?, ?) "
-        "ON CONFLICT(name) DO UPDATE SET description=excluded.description, script_path=excluded.script_path",
-        (name, description, script_path)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT INTO tools (name, description, script_path) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET description=excluded.description, script_path=excluded.script_path",
+            (name, description, script_path)
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return True
 
 
 def get_tool(name: str) -> dict | None:
     conn = get_connection()
-    row = conn.execute("SELECT * FROM tools WHERE name = ?", (name,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT * FROM tools WHERE name = ?", (name,)).fetchone()
+    finally:
+        conn.close()
     return dict(row) if row else None
 
 
 def list_tools() -> list[dict]:
     conn = get_connection()
-    rows = conn.execute("SELECT * FROM tools ORDER BY usage_count DESC").fetchall()
-    conn.close()
+    try:
+        rows = conn.execute("SELECT * FROM tools ORDER BY usage_count DESC").fetchall()
+    finally:
+        conn.close()
     return [dict(r) for r in rows]
 
 
@@ -49,12 +55,14 @@ def run_tool(name: str, args: dict = None) -> dict:
         result = module.main(args or {})
 
         conn = get_connection()
-        conn.execute(
-            "UPDATE tools SET usage_count = usage_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE name = ?",
-            (name,)
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                "UPDATE tools SET usage_count = usage_count + 1, last_used_at = CURRENT_TIMESTAMP WHERE name = ?",
+                (name,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         return result
     except Exception as e:
@@ -71,7 +79,7 @@ def save_tool_script(name: str, code: str) -> str:
 def build_tools_manifest() -> str:
     tools = list_tools()
     if not tools:
-        return "## Tools\nNoch keine Tools registriert.\n"
+        return ""
     lines = ["## Verfügbare Tools\n"]
     for t in tools:
         lines.append(f"- **{t['name']}**: {t['description']} (genutzt: {t['usage_count']}x)")

@@ -1,7 +1,8 @@
 """
 Jarvis Onboarding — einmaliger Setup beim ersten Start
 """
-from kern.db import set_config, init_db
+import httpx
+from kern.db import set_config
 from kern.memory import save_fact
 
 
@@ -73,13 +74,54 @@ def _choose(options: list[tuple[str, str]], prompt: str = "→") -> str:
         print(f"  {i}. {label}")
     choice = input(f"{prompt} ").strip()
     try:
-        return options[int(choice) - 1][0]
+        idx = int(choice) - 1
+        if 0 <= idx < len(options):
+            return options[idx][0]
     except (ValueError, IndexError):
-        return options[0][0]
+        pass
+    print(f"  (Ungültige Wahl, nutze Standard: {options[0][1]})")
+    return options[0][0]
+
+
+def _validate_api_key(provider: str, api_key: str) -> bool:
+    """Test ob der API-Key funktioniert mit einem minimalen Request."""
+    try:
+        if provider == "anthropic":
+            r = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                timeout=15,
+            )
+            return r.status_code != 401
+        elif provider == "openai":
+            r = httpx.get(
+                "https://api.openai.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15,
+            )
+            return r.status_code != 401
+        elif provider == "openrouter":
+            r = httpx.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15,
+            )
+            return r.status_code == 200
+    except (httpx.HTTPError, httpx.TimeoutException):
+        print("  (Verbindungstest fehlgeschlagen — Key wird trotzdem gespeichert)")
+    return True  # im Zweifel speichern
 
 
 def run_onboarding():
-    init_db()
     clear()
     header()
 
@@ -122,7 +164,18 @@ def run_onboarding():
     print(f"\nAPI-Key für {provider_label}:")
     api_key = input("→ ").strip()
     if api_key:
-        set_config("llm_api_key", api_key)
+        print("  Prüfe Key...", end=" ", flush=True)
+        if _validate_api_key(provider_key, api_key):
+            print("OK")
+            set_config("llm_api_key", api_key)
+        else:
+            print("UNGÜLTIG")
+            print("  Der API-Key wurde nicht akzeptiert. Bitte prüfe ihn.")
+            retry = input("  Trotzdem speichern? [j/N] → ").strip().lower()
+            if retry in ("j", "ja", "y", "yes"):
+                set_config("llm_api_key", api_key)
+            else:
+                print("  Key nicht gespeichert. Setze ihn später mit: /config set llm_api_key <key>")
 
     # ── Haupt-Modell ─────────────────────────────────────────────────────
     models = MODELS.get(provider_key, [])

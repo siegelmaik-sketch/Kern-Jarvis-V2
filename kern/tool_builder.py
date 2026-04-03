@@ -1,6 +1,7 @@
 """
 Jarvis baut sich Tools selbst.
-Erkennt REGISTER_TOOL und BUILD_TOOL Befehle in LLM-Antworten.
+Erkennt REGISTER_TOOL, BUILD_TOOL, RUN_TOOL, MEMORY_SAVE/GET/SEARCH
+Befehle in LLM-Antworten.
 """
 import re
 import json
@@ -42,7 +43,7 @@ def extract_code_block(text: str) -> str | None:
 
 
 def build_tool(tool_name: str, description: str, task: str) -> dict:
-    print(f"\n🔧 Baue Tool: {tool_name}...")
+    print(f"\n  Tool bauen: {tool_name}...")
 
     prompt = BUILD_TOOL_PROMPT.format(
         task=task,
@@ -59,22 +60,36 @@ def build_tool(tool_name: str, description: str, task: str) -> dict:
     if not code:
         code = response.strip()
 
-    script_path = save_tool_script(tool_name, code)
-    print(f"   Script gespeichert: {script_path}")
+    # User-Bestätigung vor Ausführung
+    print(f"\n  Generierter Code für '{tool_name}':")
+    print("  " + "\n  ".join(code.split("\n")[:15]))
+    if len(code.split("\n")) > 15:
+        print(f"  ... ({len(code.split(chr(10)))} Zeilen gesamt)")
 
-    test_result = run_tool_safe(tool_name, code, {})
+    try:
+        confirm = input("\n  Tool speichern und testen? [J/n] → ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        return {"success": False, "error": "Abgebrochen"}
+
+    if confirm in ("n", "nein", "no"):
+        return {"success": False, "error": "Vom User abgelehnt"}
+
+    script_path = save_tool_script(tool_name, code)
+    print(f"  Script gespeichert: {script_path}")
+
+    test_result = run_tool_temp(tool_name, code, {})
     if test_result.get("success") is False and "error" in test_result:
-        print(f"   ⚠️  Test-Warnung: {test_result['error']}")
+        print(f"  Warnung: {test_result['error']}")
     else:
-        print(f"   ✓ Test OK")
+        print(f"  Test OK")
 
     register_tool(tool_name, description, script_path)
-    print(f"   ✓ Registriert im Manifest")
+    print(f"  Registriert im Manifest")
 
     return {"success": True, "tool_name": tool_name, "script_path": script_path}
 
 
-def run_tool_safe(name: str, code: str, args: dict) -> dict:
+def run_tool_temp(name: str, code: str, args: dict) -> dict:
     import importlib.util
     import tempfile
     import os
@@ -122,17 +137,37 @@ def parse_jarvis_commands(text: str) -> list[dict]:
             "task": m.group(3)
         })
 
-    memory_matches = re.finditer(
+    memory_save_matches = re.finditer(
         r"MEMORY_SAVE\(type=['\"](.+?)['\"],\s*key=['\"](.+?)['\"],\s*value=['\"](.+?)['\"]\)",
         text,
         re.DOTALL
     )
-    for m in memory_matches:
+    for m in memory_save_matches:
         commands.append({
             "type": "memory_save",
             "memory_type": m.group(1),
             "key": m.group(2),
             "value": m.group(3)
+        })
+
+    memory_get_matches = re.finditer(
+        r"MEMORY_GET\(key=['\"](.+?)['\"]\)",
+        text,
+    )
+    for m in memory_get_matches:
+        commands.append({
+            "type": "memory_get",
+            "key": m.group(1),
+        })
+
+    memory_search_matches = re.finditer(
+        r"MEMORY_SEARCH\(query=['\"](.+?)['\"]\)",
+        text,
+    )
+    for m in memory_search_matches:
+        commands.append({
+            "type": "memory_search",
+            "query": m.group(1),
         })
 
     run_matches = re.finditer(
@@ -157,7 +192,7 @@ def parse_jarvis_commands(text: str) -> list[dict]:
 
 
 def execute_commands(commands: list[dict]) -> list[dict]:
-    from kern.memory import memory_save
+    from kern.memory import memory_save, search_fact_by_key, search_facts
     results = []
 
     for cmd in commands:
@@ -172,6 +207,20 @@ def execute_commands(commands: list[dict]) -> list[dict]:
         elif cmd["type"] == "memory_save":
             memory_save(cmd["memory_type"], cmd["key"], cmd["value"])
             results.append({"success": True, "saved": cmd["key"]})
+
+        elif cmd["type"] == "memory_get":
+            facts = search_fact_by_key(cmd["key"])
+            if facts:
+                results.append({"success": True, "result": "; ".join(f["fact"] for f in facts)})
+            else:
+                results.append({"success": True, "result": f"Kein Eintrag für '{cmd['key']}'"})
+
+        elif cmd["type"] == "memory_search":
+            facts = search_facts(cmd["query"], limit=5)
+            if facts:
+                results.append({"success": True, "result": "; ".join(f["fact"] for f in facts[:5])})
+            else:
+                results.append({"success": True, "result": "Keine Ergebnisse"})
 
         elif cmd["type"] == "run_tool":
             result = run_tool(cmd["name"], cmd.get("args", {}))

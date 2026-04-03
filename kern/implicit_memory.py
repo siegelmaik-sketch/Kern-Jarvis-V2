@@ -14,10 +14,7 @@ import logging
 import re
 from datetime import datetime
 
-import httpx
-
-from kern.db import get_config
-from kern.memory import save_fact, get_memory_llm_model
+from kern.memory import save_fact, _parse_llm_json
 
 log = logging.getLogger(__name__)
 
@@ -74,42 +71,33 @@ def extract_from_conversation(user_message: str, assistant_reply: str) -> list[d
     _last_extraction = now
 
     try:
-        api_key = get_config("llm_api_key", "")
-        client = httpx.Client(
-            timeout=15,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+        from kern.brain import memory_chat
+        text = memory_chat(
+            prompt=f"Chat-Ausschnitt:\n\nUser: {user_message}\n\nJarvis: {assistant_reply}",
+            system=_EXTRACTION_PROMPT,
+            max_tokens=1024,
         )
 
-        r = client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            json={
-                "model": get_memory_llm_model(),
-                "messages": [
-                    {"role": "system", "content": _EXTRACTION_PROMPT},
-                    {"role": "user", "content": f"Chat-Ausschnitt:\n\nUser: {user_message}\n\nJarvis: {assistant_reply}"},
-                ],
-                "max_tokens": 1024,
-                "temperature": 0,
-            },
-        )
-        r.raise_for_status()
-        data = r.json()
-        client.close()
-
-        text = data["choices"][0]["message"]["content"].strip()
-
-        # Parse JSON (handle markdown blocks)
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
+        # Parse JSON — robust, handles ```json blocks and extra whitespace
+        parsed = _parse_llm_json(text)
+        if parsed is None:
+            # Fallback: try to find a JSON array directly
             text = text.strip()
+            if text.startswith("```"):
+                text = re.sub(r"^```(?:json)?\s*", "", text)
+                text = re.sub(r"\s*```$", "", text)
+            try:
+                parsed = json.loads(text.strip())
+            except json.JSONDecodeError:
+                log.debug("implicit_memory: JSON-Parsing fehlgeschlagen")
+                return []
 
-        items = json.loads(text)
-        if not isinstance(items, list):
+        # _parse_llm_json returns dict for objects, handle both
+        if isinstance(parsed, dict):
+            items = parsed.get("items", [parsed])
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
             return []
 
         # Filter by confidence
