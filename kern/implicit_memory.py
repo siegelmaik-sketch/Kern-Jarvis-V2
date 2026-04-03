@@ -17,7 +17,7 @@ from datetime import datetime
 import httpx
 
 from kern.db import get_config
-from kern.memory import save_fact, MEMORY_LLM_MODEL
+from kern.memory import save_fact, get_memory_llm_model
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def extract_from_conversation(user_message: str, assistant_reply: str) -> list[d
         r = client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json={
-                "model": MEMORY_LLM_MODEL,
+                "model": get_memory_llm_model(),
                 "messages": [
                     {"role": "system", "content": _EXTRACTION_PROMPT},
                     {"role": "user", "content": f"Chat-Ausschnitt:\n\nUser: {user_message}\n\nJarvis: {assistant_reply}"},

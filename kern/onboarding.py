@@ -2,7 +2,7 @@
 Jarvis Onboarding — einmaliger Setup beim ersten Start
 """
 from kern.db import set_config, init_db
-from kern.memory import memory_save
+from kern.memory import save_fact
 
 
 PROVIDERS = {
@@ -21,11 +21,39 @@ MODELS = {
         ("gpt-4o-mini", "GPT-4o Mini — schnell + günstig"),
     ],
     "openrouter": [
-        ("anthropic/claude-opus-4-6", "Claude Opus via OpenRouter"),
+        ("anthropic/claude-opus-4-6", "Claude Opus 4.6 via OpenRouter"),
+        ("anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6 via OpenRouter"),
+        ("google/gemini-2.5-pro-preview-03-25", "Gemini 2.5 Pro Preview"),
         ("openai/gpt-4o", "GPT-4o via OpenRouter"),
         ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B — Open Source"),
     ],
 }
+
+# Günstige Modelle für Memory-Operationen (Quality Gate, Implicit Memory, Topic Tracking)
+MEMORY_MODELS = {
+    "openrouter": [
+        ("google/gemini-2.5-flash", "Gemini 2.5 Flash — schnell + günstig (empfohlen)"),
+        ("google/gemini-2.5-pro-preview-03-25", "Gemini 2.5 Pro — besser aber teurer"),
+        ("anthropic/claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+        ("openai/gpt-4o-mini", "GPT-4o Mini"),
+        ("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"),
+    ],
+    "anthropic": [
+        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5 — schnell + günstig (empfohlen)"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+    ],
+    "openai": [
+        ("gpt-4o-mini", "GPT-4o Mini — schnell + günstig (empfohlen)"),
+        ("gpt-4o", "GPT-4o"),
+    ],
+}
+
+# Embedding-Modelle (nur OpenRouter hat Embedding-API)
+EMBEDDING_MODELS = [
+    ("qwen/qwen3-embedding-8b", "Qwen3 Embedding 8B — 1024 dims (empfohlen)"),
+    ("openai/text-embedding-3-small", "OpenAI Embedding 3 Small — 1536 dims"),
+    ("openai/text-embedding-3-large", "OpenAI Embedding 3 Large — 3072 dims"),
+]
 
 
 def clear():
@@ -39,6 +67,17 @@ def header():
     print()
 
 
+def _choose(options: list[tuple[str, str]], prompt: str = "→") -> str:
+    """Helper: zeigt nummerierte Liste, gibt gewählten Key zurück."""
+    for i, (_, label) in enumerate(options, 1):
+        print(f"  {i}. {label}")
+    choice = input(f"{prompt} ").strip()
+    try:
+        return options[int(choice) - 1][0]
+    except (ValueError, IndexError):
+        return options[0][0]
+
+
 def run_onboarding():
     init_db()
     clear()
@@ -47,30 +86,31 @@ def run_onboarding():
     print("Willkommen. Ich bin Jarvis — dein persistenter KI-Assistent.")
     print("Ich richte mich jetzt einmalig ein.\n")
 
-    # Name
+    # ── Name ─────────────────────────────────────────────────────────────
     name = input("Wie heißt du? → ").strip()
     if not name:
         name = "Nutzer"
-    memory_save("user", "name", name)
+    save_fact(f"User heißt {name}", category="preference", source="user", importance=9)
     set_config("user_name", name)
 
-    # Sprache
+    # ── Sprache ──────────────────────────────────────────────────────────
     print(f"\nHallo {name}. Welche Sprache bevorzugst du?")
     print("  1. Deutsch")
     print("  2. Englisch")
     lang_choice = input("→ ").strip()
     language = "de" if lang_choice != "2" else "en"
     set_config("language", language)
-    memory_save("user", "sprache", "Deutsch" if language == "de" else "English")
+    lang_label = "Deutsch" if language == "de" else "English"
+    save_fact(f"Bevorzugte Sprache: {lang_label}", category="preference", source="user", importance=8)
 
-    # Nutzung
+    # ── Nutzung ──────────────────────────────────────────────────────────
     print(f"\nWofür möchtest du mich hauptsächlich nutzen?")
     print("(Freitext — z.B. 'Entwicklung, Automatisierung, Recherche')")
     usage = input("→ ").strip()
     if usage:
-        memory_save("user", "hauptnutzung", usage)
+        save_fact(f"Hauptnutzung: {usage}", category="preference", source="user", importance=7)
 
-    # LLM Provider
+    # ── LLM Provider ─────────────────────────────────────────────────────
     print(f"\nWelchen KI-Provider möchtest du nutzen?")
     for k, (_, label) in PROVIDERS.items():
         print(f"  {k}. {label}")
@@ -78,35 +118,57 @@ def run_onboarding():
     provider_key, provider_label = PROVIDERS.get(provider_choice, ("anthropic", "Anthropic (Claude)"))
     set_config("llm_provider", provider_key)
 
-    # Model
-    print(f"\nWelches Modell?")
-    models = MODELS.get(provider_key, [])
-    for i, (model_id, model_label) in enumerate(models, 1):
-        print(f"  {i}. {model_label}")
-    model_choice = input("→ ").strip()
-    try:
-        model_id = models[int(model_choice) - 1][0]
-    except Exception:
-        model_id = models[0][0]
-    set_config("llm_model", model_id)
-
-    # API Key
+    # ── API Key ──────────────────────────────────────────────────────────
     print(f"\nAPI-Key für {provider_label}:")
     api_key = input("→ ").strip()
     if api_key:
         set_config("llm_api_key", api_key)
 
-    # Abschluss
+    # ── Haupt-Modell ─────────────────────────────────────────────────────
+    models = MODELS.get(provider_key, [])
+    print(f"\nWelches Haupt-Modell? (für Conversations + Tool-Building)")
+    model_id = _choose(models)
+    set_config("llm_model", model_id)
+
+    # ── Memory-Modell (günstig) ──────────────────────────────────────────
+    memory_models = MEMORY_MODELS.get(provider_key, [])
+    print(f"\nWelches Memory-Modell? (für Quality Gate, Implicit Memory — sollte günstig sein)")
+    memory_model_id = _choose(memory_models)
+    set_config("memory_llm_model", memory_model_id)
+
+    # ── Embedding-Modell ─────────────────────────────────────────────────
+    print(f"\nWelches Embedding-Modell? (für semantische Suche in der Memory)")
+    if provider_key == "openrouter":
+        embedding_model_id = _choose(EMBEDDING_MODELS)
+    else:
+        print("  Hinweis: Embeddings laufen über OpenRouter.")
+        print("  Falls du einen anderen Provider für Conversations nutzt,")
+        print("  braucht Jarvis trotzdem einen OpenRouter-Key für Embeddings.")
+        or_key = input("\n  OpenRouter API-Key (für Embeddings): → ").strip()
+        if or_key:
+            set_config("embedding_api_key", or_key)
+        embedding_model_id = _choose(EMBEDDING_MODELS)
+    set_config("embedding_model", embedding_model_id)
+
+    # ── Abschluss ────────────────────────────────────────────────────────
     set_config("onboarding_done", "true")
 
     print()
     print("=" * 60)
     print(f"  Alles eingerichtet, {name}.")
-    print(f"  Provider: {provider_label}")
-    print(f"  Modell:   {model_id}")
+    print(f"  Provider:        {provider_label}")
+    print(f"  Haupt-Modell:    {model_id}")
+    print(f"  Memory-Modell:   {memory_model_id}")
+    print(f"  Embedding-Modell:{embedding_model_id}")
     print("=" * 60)
     print()
     print("Ich starte jetzt. Du kannst mich alles fragen.")
     print("Wenn ich ein Tool brauche das ich noch nicht habe,")
-    print("baue ich es mir selbst.\n")
+    print("baue ich es mir selbst.")
+    print()
+    print("Alle Modelle können jederzeit geändert werden über:")
+    print("  /config set llm_model <modell-id>")
+    print("  /config set memory_llm_model <modell-id>")
+    print("  /config set embedding_model <modell-id>")
+    print()
     input("Weiter mit Enter...")

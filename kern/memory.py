@@ -28,9 +28,19 @@ log = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────────
 
 CONTEXT_MAX_MESSAGES = 20
-EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
 EMBEDDING_DIMS = 1024
-MEMORY_LLM_MODEL = "google/gemini-2.5-flash"
+
+# Defaults — werden von Config überschrieben wenn gesetzt
+_DEFAULT_EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
+_DEFAULT_MEMORY_LLM_MODEL = "google/gemini-2.5-flash"
+
+
+def get_embedding_model() -> str:
+    return get_config("embedding_model", _DEFAULT_EMBEDDING_MODEL)
+
+
+def get_memory_llm_model() -> str:
+    return get_config("memory_llm_model", _DEFAULT_MEMORY_LLM_MODEL)
 
 # ── Embedding Client ─────────────────────────────────────────────────────────
 
@@ -60,7 +70,7 @@ def _get_embedding(text: str) -> np.ndarray | None:
         r = client.post(
             "https://openrouter.ai/api/v1/embeddings",
             json={
-                "model": EMBEDDING_MODEL,
+                "model": get_embedding_model(),
                 "input": text[:8000],
                 "dimensions": EMBEDDING_DIMS,
             },
@@ -164,7 +174,7 @@ def _gate_fact(fact: str, category: str) -> tuple[bool, int]:
         r = client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json={
-                "model": MEMORY_LLM_MODEL,
+                "model": get_memory_llm_model(),
                 "messages": [{"role": "user", "content": (
                     'Rate this fact for long-term storage. Answer ONLY with JSON: '
                     '{"save": true/false, "importance": 1-10}\n\n'
@@ -432,7 +442,7 @@ def update_conversation_topic(recent_messages: list[dict]) -> None:
         r = client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json={
-                "model": MEMORY_LLM_MODEL,
+                "model": get_memory_llm_model(),
                 "messages": [{"role": "user", "content": (
                     "What is the current topic of this conversation? "
                     "Answer in max 10 words German. "

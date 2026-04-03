@@ -12,7 +12,7 @@ from kern.memory import (
 from kern.tools import build_tools_manifest, run_tool, list_tools
 from kern.tool_builder import parse_jarvis_commands, execute_commands
 from kern.implicit_memory import extract_from_conversation
-from kern.db import get_config
+from kern.db import get_config, set_config
 
 
 COMMANDS = {
@@ -20,6 +20,7 @@ COMMANDS = {
     "/tools":   "Zeigt alle registrierten Tools",
     "/memory":  "Zeigt den aktuellen Memory-Inhalt",
     "/search":  "Semantische Suche in der Memory (z.B. /search Bitcoin)",
+    "/config":  "Konfiguration anzeigen/ändern (z.B. /config set llm_model ...)",
     "/reset":   "Löscht den Nachrichtenverlauf (Facts bleiben erhalten)",
     "/exit":    "Beendet Jarvis",
 }
@@ -55,6 +56,35 @@ def print_memory():
         print(f"  {marker} [{f['category']}] {f['fact']} (imp={imp}, src={f.get('source', '?')})")
     print(f"\n  Nachrichten gesamt: {get_message_count()}")
     print()
+
+
+def print_config(args: str):
+    CONFIG_KEYS = [
+        "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
+        "user_name", "language",
+    ]
+    parts = args.split(maxsplit=2)
+
+    if not parts or parts[0] not in ("set", "get"):
+        print("\nAktuelle Konfiguration:")
+        for key in CONFIG_KEYS:
+            val = get_config(key, "—")
+            print(f"  {key}: {val}")
+        api = get_config("llm_api_key", "")
+        print(f"  llm_api_key: {'***' + api[-4:] if len(api) > 4 else '(nicht gesetzt)'}")
+        print(f"\nÄndern: /config set <key> <value>")
+        print()
+        return
+
+    if parts[0] == "set" and len(parts) == 3:
+        key, value = parts[1], parts[2]
+        set_config(key, value)
+        print(f"  {key} → {value}\n")
+    elif parts[0] == "get" and len(parts) >= 2:
+        val = get_config(parts[1], "—")
+        print(f"  {parts[1]}: {val}\n")
+    else:
+        print("Verwendung: /config set <key> <value> | /config get <key> | /config\n")
 
 
 def print_search(query: str):
@@ -116,6 +146,9 @@ def run_loop():
             continue
         elif user_input.startswith("/search"):
             print_search(user_input[7:].strip())
+            continue
+        elif user_input.startswith("/config"):
+            print_config(user_input[7:].strip())
             continue
         elif user_input == "/reset":
             clear_messages()

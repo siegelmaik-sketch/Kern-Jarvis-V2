@@ -50,9 +50,9 @@ def get_model() -> str:
     if saved:
         return saved
     defaults = {
-        "anthropic": "claude-opus-4-6",
+        "anthropic": "claude-sonnet-4-6",
         "openai": "gpt-4o",
-        "openrouter": "anthropic/claude-opus-4-6",
+        "openrouter": "anthropic/claude-sonnet-4-6",
     }
     return defaults.get(provider, "claude-opus-4-6")
 
