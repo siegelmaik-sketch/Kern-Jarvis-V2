@@ -1,25 +1,25 @@
 # Kern-Jarvis V2
 
-Ein selbstlernender, persistenter KI-Assistent — läuft lokal auf deinem System, baut sich seine Tools selbst.
+A self-learning, persistent AI assistant — runs locally on your system and builds its own tools on demand.
 
-## Konzept
+## Concept
 
-Jarvis startet mit einem festen Kern (wer er ist, wie er denkt) und einem leeren Werkzeugkasten. Wenn er eine Aufgabe bekommt für die er kein Tool hat, baut er es sich selbst — testet es, speichert es persistent und nutzt es ab sofort direkt ohne LLM-Aufruf.
+Jarvis starts with a fixed core (who he is, how he thinks) and an empty toolbox. When given a task he has no tool for, he builds it himself — tests it, saves it persistently, and uses it directly from then on without any LLM call.
 
 ```
-Aufgabe → Tool vorhanden? → ausführen
-                ↓ nein
-          Tool bauen → testen → speichern → ausführen
+Task → Tool available? → execute
+             ↓ no
+       Build tool → test → save → execute
 ```
 
 ## Features
 
-- **Self-Tool-Builder** — Jarvis schreibt Python-Tools bei Bedarf selbst
-- **Persistentes Memory** — erinnert sich an Nutzer, Feedback, Projekte, Referenzen
-- **LLM-agnostisch** — Anthropic, OpenAI oder OpenRouter (ein API Key reicht)
-- **Ewiger Loop** — kein Neustart bei neuen Tools, dynamisches Manifest
-- **SQLite** — keine externe Datenbank nötig
-- **Onboarding** — geführte Ersteinrichtung beim ersten Start
+- **Self-Tool-Builder** — Jarvis writes Python tools on demand
+- **Persistent Memory** — remembers user preferences, feedback, projects and references
+- **LLM-agnostic** — Anthropic, OpenAI or OpenRouter (one API key is enough)
+- **Eternal loop** — no restart needed when new tools are added, dynamic manifest
+- **SQLite** — no external database required
+- **Onboarding** — guided setup on first launch
 
 ## Installation
 
@@ -30,43 +30,43 @@ pip install -r requirements.txt
 python3 jarvis.py
 ```
 
-Beim ersten Start führt Jarvis dich durch die Einrichtung (Name, Sprache, LLM-Provider, API Key).
+On first launch, Jarvis guides you through setup (name, language, LLM provider, API key).
 
-## Unterstützte Provider
+## Supported Providers
 
-| Provider | Modell-Beispiele |
+| Provider | Model Examples |
 |---|---|
 | Anthropic | claude-opus-4-6, claude-sonnet-4-6 |
 | OpenAI | gpt-4o, gpt-4o-mini |
-| OpenRouter | Alle verfügbaren Modelle |
+| OpenRouter | All available models |
 
-## Befehle im Chat
-
-```
-/tools    Zeigt alle registrierten Tools
-/memory   Zeigt den Memory-Inhalt
-/reset    Neue Session (Memory bleibt erhalten)
-/hilfe    Hilfe anzeigen
-/exit     Beenden
-```
-
-## Struktur
+## Commands
 
 ```
-jarvis.py          Einstiegspunkt
+/tools    Show all registered tools
+/memory   Show memory contents
+/reset    New session (memory is preserved)
+/hilfe    Show help
+/exit     Quit
+```
+
+## Structure
+
+```
+jarvis.py          Entry point
 kern/
-  brain.py         LLM-Adapter
-  memory.py        Memory-System
-  tools.py         Tool-Registry
-  tool_builder.py  Self-Build-Loop
-  loop.py          Kern-Loop
-  onboarding.py    Ersteinrichtung
+  brain.py         LLM adapter
+  memory.py        Memory system
+  tools.py         Tool registry
+  tool_builder.py  Self-build loop
+  loop.py          Core loop
+  onboarding.py    First-run setup
   db.py            SQLite
-prompts/kern.md    Statischer Kern-Prompt
-tools/             Selbstgebaute Tools (gitignored)
-data/              SQLite Datenbank (gitignored)
+prompts/kern.md    Static core prompt
+tools/             Self-built tools (gitignored)
+data/              SQLite database (gitignored)
 ```
 
-## Philosophie
+## Philosophy
 
-Jarvis ist kein Wrapper — er ist ein System das mit dir wächst. Jedes Tool das er baut, jede Korrektur die du gibst, jeder Kontext den du teilst bleibt dauerhaft erhalten. Token werden gespart indem wiederholbare Aufgaben als Tool ausgelagert werden statt jedes Mal das LLM zu bemühen.
+Jarvis is not a wrapper — it's a system that grows with you. Every tool it builds, every correction you give, every context you share is retained permanently. Tokens are saved by offloading repeatable tasks to tools instead of calling the LLM every time.
