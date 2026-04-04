@@ -24,3 +24,7 @@ class ToolError(KernError):
 
 class ToolSecurityError(ToolError):
     """Raised when a tool operation violates security constraints."""
+
+
+class MCPError(KernError):
+    """Raised when MCP server communication fails."""

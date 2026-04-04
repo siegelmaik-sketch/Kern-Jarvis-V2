@@ -28,6 +28,7 @@ COMMANDS = {
     "/memory":  "Zeigt den aktuellen Memory-Inhalt",
     "/search":  "Semantische Suche in der Memory (z.B. /search Bitcoin)",
     "/config":  "Konfiguration anzeigen/ändern (z.B. /config set llm_model ...)",
+    "/mcp":     "MCP-Server verwalten (add/remove/list/refresh)",
     "/reset":   "Löscht den Nachrichtenverlauf (Facts bleiben erhalten)",
     "/exit":    "Beendet Jarvis",
 }
@@ -122,6 +123,64 @@ def print_config(args: str) -> None:
         print("Verwendung: /config set <key> <value> | /config get <key> | /config\n")
 
 
+def print_mcp(args: str) -> None:
+    from kern.db import add_mcp_server, remove_mcp_server, list_mcp_servers
+    from kern.mcp_client import fetch_tools, invalidate_cache, load_all_servers
+    import json as _json
+
+    parts = args.split(maxsplit=2)
+    sub = parts[0] if parts else ""
+
+    if sub == "add" and len(parts) >= 3:
+        name, url = parts[1], parts[2]
+        add_mcp_server(name, url)
+        invalidate_cache(name)
+        try:
+            tools = fetch_tools(name, url)
+            print(f"\n  MCP-Server '{name}' hinzugefügt — {len(tools)} Tool(s) geladen.")
+            for t in tools:
+                print(f"    • {t['name']}: {t['description']}")
+        except Exception as e:
+            print(f"\n  Server gespeichert, aber noch nicht erreichbar: {e}")
+        print()
+
+    elif sub == "remove" and len(parts) >= 2:
+        from kern.db import remove_mcp_server
+        name = parts[1]
+        if remove_mcp_server(name):
+            invalidate_cache(name)
+            print(f"\n  MCP-Server '{name}' entfernt.\n")
+        else:
+            print(f"\n  Server '{name}' nicht gefunden.\n")
+
+    elif sub == "list" or sub == "":
+        servers = list_mcp_servers()
+        if not servers:
+            print("\n  Keine MCP-Server konfiguriert.")
+            print("  Hinzufügen: /mcp add <name> <url>\n")
+            return
+        print(f"\n{len(servers)} MCP-Server:")
+        for s in servers:
+            status = "✓" if s["enabled"] else "✗"
+            print(f"  [{status}] {s['name']} — {s['url']}")
+        print()
+
+    elif sub == "refresh":
+        invalidate_cache()
+        try:
+            tools = load_all_servers()
+            print(f"\n  MCP-Cache geleert — {len(tools)} Tool(s) neu geladen.\n")
+        except Exception as e:
+            print(f"\n  Fehler beim Refresh: {e}\n")
+
+    else:
+        print("\nVerwendung:")
+        print("  /mcp list                    — alle Server anzeigen")
+        print("  /mcp add <name> <url>        — Server hinzufügen")
+        print("  /mcp remove <name>           — Server entfernen")
+        print("  /mcp refresh                 — Tool-Cache neu laden\n")
+
+
 def print_search(query: str) -> None:
     from kern.memory import search_facts
     if not query:
@@ -195,6 +254,9 @@ def run_loop() -> None:
             continue
         elif user_input.startswith("/config"):
             print_config(user_input[7:].strip())
+            continue
+        elif user_input.startswith("/mcp"):
+            print_mcp(user_input[4:].strip())
             continue
         elif user_input == "/reset":
             clear_messages()

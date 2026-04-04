@@ -57,3 +57,39 @@ def set_config(key: str, value: str) -> None:
 
 def is_configured() -> bool:
     return get_config("onboarding_done") == "true"
+
+
+# ── MCP Server Registry ───────────────────────────────────────────────────────
+
+def add_mcp_server(name: str, url: str, headers: dict | None = None) -> None:
+    import json
+    with connection() as conn:
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url, headers) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET url=excluded.url, headers=excluded.headers, enabled=1",
+            (name, url, json.dumps(headers or {}))
+        )
+        conn.commit()
+
+
+def remove_mcp_server(name: str) -> bool:
+    with connection() as conn:
+        cur = conn.execute("DELETE FROM mcp_servers WHERE name = ?", (name,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def list_mcp_servers() -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM mcp_servers ORDER BY name"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_mcp_server(name: str) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM mcp_servers WHERE name = ?", (name,)
+        ).fetchone()
+        return dict(row) if row else None

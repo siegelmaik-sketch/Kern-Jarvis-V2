@@ -281,6 +281,6 @@ class TestBuildToolsManifest:
             manifest = build_tools_manifest()
             assert "btc" in manifest
             assert "Bitcoin" in manifest
-            assert "Verfügbare Tools" in manifest
+            assert "Lokale Tools" in manifest
         finally:
             kern.tools.TOOLS_DIR = old

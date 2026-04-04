@@ -1,18 +1,23 @@
 """
 Kern-Jarvis V2 — Tool Registry + Execution
+
+Local tools: stored in SQLite + tools/ dir, executed via importlib.
+MCP tools:   proxied to MCP servers, prefixed with "mcp__<server>__<tool>".
 """
 import importlib.util
+import json
 import logging
 import re
 from pathlib import Path
 
-from kern.db import connection
+from kern.db import connection, list_mcp_servers
 from kern.exceptions import ToolSecurityError
 
 log = logging.getLogger(__name__)
 
 TOOLS_DIR = Path(__file__).parent.parent / "tools"
 _VALID_TOOL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+MCP_PREFIX = "mcp__"
 
 
 def _validate_tool_name(name: str) -> None:
@@ -58,7 +63,36 @@ def list_tools() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def run_mcp_tool(mcp_tool_name: str, args: dict | None = None) -> dict:
+    """Route a prefixed MCP tool name (mcp__server__tool) to the right MCP server."""
+    from kern.mcp_client import call_tool
+    from kern.exceptions import MCPError
+
+    # Strip prefix, split into server + tool
+    without_prefix = mcp_tool_name[len(MCP_PREFIX):]
+    parts = without_prefix.split("__", 1)
+    if len(parts) != 2:
+        return {"success": False, "error": f"Ungültiger MCP-Tool-Name: {mcp_tool_name!r}"}
+
+    server_name, tool_name = parts
+    server = next((s for s in list_mcp_servers() if s["name"] == server_name), None)
+    if not server:
+        return {"success": False, "error": f"MCP-Server '{server_name}' nicht gefunden"}
+    if not server["enabled"]:
+        return {"success": False, "error": f"MCP-Server '{server_name}' ist deaktiviert"}
+
+    extra_headers = json.loads(server.get("headers", "{}")) or None
+    try:
+        return call_tool(server["url"], tool_name, args or {}, extra_headers)
+    except MCPError as e:
+        log.error("MCP tool call failed [%s/%s]: %s", server_name, tool_name, e)
+        return {"success": False, "error": str(e)}
+
+
 def run_tool(name: str, args: dict | None = None) -> dict:
+    if name.startswith(MCP_PREFIX):
+        return run_mcp_tool(name, args)
+
     tool = get_tool(name)
     if not tool:
         return {"success": False, "error": f"Tool '{name}' nicht gefunden"}
@@ -108,10 +142,26 @@ def save_tool_script(name: str, code: str) -> str:
 
 
 def build_tools_manifest() -> str:
-    tools = list_tools()
-    if not tools:
-        return ""
-    lines = ["## Verfügbare Tools\n"]
-    for t in tools:
-        lines.append(f"- **{t['name']}**: {t['description']} (genutzt: {t['usage_count']}x)")
+    from kern.mcp_client import load_all_servers
+
+    lines: list[str] = []
+
+    local = list_tools()
+    if local:
+        lines.append("## Lokale Tools\n")
+        for t in local:
+            lines.append(f"- **{t['name']}**: {t['description']} (genutzt: {t['usage_count']}x)")
+
+    try:
+        mcp_tools = load_all_servers()
+    except Exception as e:
+        log.warning("MCP tool load failed: %s", e)
+        mcp_tools = []
+
+    if mcp_tools:
+        lines.append("\n## MCP Tools\n")
+        for t in mcp_tools:
+            mcp_name = f"{MCP_PREFIX}{t['server']}__{t['name']}"
+            lines.append(f"- **{mcp_name}**: {t['description']}")
+
     return "\n".join(lines)
