@@ -8,5 +8,6 @@ services:
     volumes:
       - ./data:/app/data        # SQLite DB + State
       - ./tools:/app/tools      # Self-built tools persist
+      - ~/.claude:/root/.claude:ro  # Claude Code OAuth credentials
     environment:
       - PYTHONUNBUFFERED=1
