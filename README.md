@@ -63,9 +63,24 @@ Each instance has its own `data/` and `tools/` — fully isolated.
 
 ---
 
-### Option B — Local (no Docker)
+### Option B — Windows (Docker Desktop)
 
-Requires Python 3.12+.
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+2. Open PowerShell or Windows Terminal:
+
+```powershell
+git clone https://github.com/siegelmaik-sketch/Kern-Jarvis-V2.git
+cd Kern-Jarvis-V2
+docker compose run --rm kern-jarvis-v2
+```
+
+Identical to the Linux setup — no adjustments needed.
+
+---
+
+### Option C — Local (no Docker)
+
+Requires Python 3.12+. Works on Linux, macOS and Windows.
 
 ```bash
 git clone https://github.com/siegelmaik-sketch/Kern-Jarvis-V2.git
