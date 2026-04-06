@@ -14,32 +14,10 @@ import re
 import shutil
 import subprocess
 
-from kern.tools import TOOLS_DIR, save_tool_script, register_tool, run_tool
+from kern.tools import TOOLS_DIR, register_tool, run_tool
 from kern.exceptions import ToolSecurityError
 
 log = logging.getLogger(__name__)
-
-BUILD_TOOL_PROMPT = """Du sollst ein Python-Tool schreiben für folgende Aufgabe: {task}
-
-Das Script MUSS folgende Struktur haben:
-```python
-# Tool: {tool_name}
-# Beschreibung: {description}
-
-def main(args: dict) -> dict:
-    # args enthält die Eingabeparameter
-    try:
-        # Deine Implementierung hier
-        result = ...
-        return {{"success": True, "result": result, "error": None}}
-    except Exception as e:
-        return {{"success": False, "result": None, "error": str(e)}}
-```
-
-Schreibe NUR den Python-Code, keine Erklärungen darum herum.
-Nutze nur Standard-Bibliotheken oder requests/httpx wenn nötig.
-Das Tool soll robust und wiederverwendbar sein.
-"""
 
 
 CLAUDE_CODE_TOOL_PROMPT = """Write a Python tool for Kern-Jarvis V2.
@@ -139,98 +117,28 @@ def _build_tool_with_claude_code(tool_name: str, description: str, task: str) ->
     return {"success": True, "script_path": str(script_path)}
 
 
-def extract_code_block(text: str) -> str | None:
-    match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"```\n(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
-
 
 def build_tool(tool_name: str, description: str, task: str, auto_confirm: bool = False) -> dict:
     log.info("Building tool: %s", tool_name)
 
-    # ── Strategy 1: Claude Code CLI ──────────────────────────────────────────
-    if _claude_code_available():
-        print(f"\n  Tool bauen via Claude Code: {tool_name}...")
-
-        if not auto_confirm:
-            try:
-                confirm = input("\n  Claude Code beauftragen? [J/n] -> ").strip().lower()
-                if confirm in ("n", "nein", "no"):
-                    return {"success": False, "error": "Abgebrochen"}
-            except (KeyboardInterrupt, EOFError):
-                return {"success": False, "error": "Abgebrochen"}
-
-        cc_result = _build_tool_with_claude_code(tool_name, description, task)
-
-        if cc_result["success"]:
-            script_path = cc_result["script_path"]
-            print(f"  Script erstellt: {script_path}")
-            try:
-                register_tool(tool_name, description, script_path)
-            except ToolSecurityError as e:
-                log.error("Tool registration failed: %s", e)
-                return {"success": False, "error": str(e)}
-            log.info("Tool built (Claude Code) and registered: %s", tool_name)
-            print("  Registriert im Manifest")
-            return {"success": True, "tool_name": tool_name, "script_path": script_path}
-
-        log.warning("Claude Code failed for %s: %s — falling back to LLM", tool_name, cc_result["error"])
-        print(f"  Claude Code fehlgeschlagen ({cc_result['error']}) — Fallback auf LLM...")
-
-    # ── Strategy 2: LLM via brain.chat() ─────────────────────────────────────
-    from kern.brain import chat
-
-    print(f"\n  Tool bauen via LLM: {tool_name}...")
-
-    prompt = BUILD_TOOL_PROMPT.format(
-        task=task,
-        tool_name=tool_name,
-        description=description
-    )
-
-    response = chat(
-        messages=[{"role": "user", "content": prompt}],
-        system="Du bist ein Python-Experte. Schreibe nur Code, keine Erklärungen."
-    )
-
-    code = extract_code_block(response)
-    if not code:
-        code = response.strip()
-
-    print(f"\n  Generierter Code für '{tool_name}':")
-    print("  " + "\n  ".join(code.split("\n")[:15]))
-    if len(code.split("\n")) > 15:
-        print(f"  ... ({len(code.split(chr(10)))} Zeilen gesamt)")
-
-    if auto_confirm:
-        confirm = "j"
-    else:
+    if not auto_confirm:
         try:
-            confirm = input("\n  Tool speichern und testen? [J/n] -> ").strip().lower()
+            confirm = input(f"\n  Claude Code baut Tool '{tool_name}'. Weiter? [J/n] -> ").strip().lower()
+            if confirm in ("n", "nein", "no"):
+                return {"success": False, "error": "Abgebrochen"}
         except (KeyboardInterrupt, EOFError):
             return {"success": False, "error": "Abgebrochen"}
 
-    if confirm in ("n", "nein", "no"):
-        return {"success": False, "error": "Vom User abgelehnt"}
+    if not _claude_code_available():
+        return {"success": False, "error": "Claude Code nicht verfügbar (nicht installiert oder nicht authentifiziert)"}
 
-    try:
-        script_path = save_tool_script(tool_name, code)
-    except ToolSecurityError as e:
-        log.error("Tool security violation: %s", e)
-        return {"success": False, "error": str(e)}
+    cc_result = _build_tool_with_claude_code(tool_name, description, task)
 
-    print(f"  Script gespeichert: {script_path}")
+    if not cc_result["success"]:
+        return cc_result
 
-    test_result = run_tool_temp(tool_name, code, {})
-    if test_result.get("success") is False and "error" in test_result:
-        log.warning("Tool test failed [%s]: %s", tool_name, test_result["error"])
-        print(f"  Warnung: {test_result['error']}")
-    else:
-        print("  Test OK")
+    script_path = cc_result["script_path"]
+    print(f"  Script erstellt: {script_path}")
 
     try:
         register_tool(tool_name, description, script_path)
@@ -238,30 +146,11 @@ def build_tool(tool_name: str, description: str, task: str, auto_confirm: bool =
         log.error("Tool registration failed: %s", e)
         return {"success": False, "error": str(e)}
 
-    log.info("Tool built (LLM) and registered: %s -> %s", tool_name, script_path)
+    log.info("Tool built and registered: %s", tool_name)
     print("  Registriert im Manifest")
-
     return {"success": True, "tool_name": tool_name, "script_path": script_path}
 
 
-def run_tool_temp(name: str, code: str, args: dict) -> dict:
-    import importlib.util
-    import tempfile
-    import os
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(code)
-        tmp_path = f.name
-
-    try:
-        spec = importlib.util.spec_from_file_location(name, tmp_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.main(args)
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-    finally:
-        os.unlink(tmp_path)
 
 
 def parse_jarvis_commands(text: str) -> list[dict]:
