@@ -20,6 +20,7 @@ Task → Tool available? → execute
 - **LLM-agnostic** — Anthropic, OpenAI or OpenRouter (one API key is enough)
 - **Semantic Search** — embedding-based retrieval over facts and archived conversations
 - **Eternal loop** — no restart needed when new tools are added, dynamic manifest
+- **Telegram** — optional bot interface, chat via Telegram instead of the terminal
 - **SQLite** — no external database required
 - **Onboarding** — guided setup on first launch
 
@@ -74,7 +75,8 @@ kern/
   tools.py           Tool registry + execution with path validation
   tool_builder.py    Self-build loop + command parser
   loop.py            Core loop + slash commands
-  onboarding.py      First-run setup wizard
+  onboarding.py      First-run setup wizard (incl. Telegram)
+  telegram.py        Telegram bot interface (long-polling)
   db.py              SQLite with connection context manager
   exceptions.py      Exception hierarchy
   schema.sql         Database schema
@@ -84,15 +86,40 @@ data/                SQLite database (gitignored)
 tests/               171 tests
 ```
 
+## Telegram Setup
+
+Jarvis can receive and answer messages via Telegram. The onboarding wizard will ask for a bot token. If you skip it, set it up later:
+
+**1. Create a bot via BotFather**
+1. Open Telegram and search for `@BotFather`
+2. Send `/newbot`
+3. Choose a display name (e.g. `My Jarvis`)
+4. Choose a username — must end in `bot` (e.g. `my_jarvis_bot`)
+5. BotFather replies with a token like `1234567890:AAH...`
+
+**2. Set the token**
+
+During onboarding (prompted automatically), or at any time:
+```
+/config set telegram_token <your-token>
+```
+
+The bot starts immediately — no restart needed. The first person to send a message to the bot will be authorized automatically. Every subsequent message from a different chat ID is rejected.
+
+**Docker / headless mode**
+
+When running without a terminal (e.g. `docker compose up -d`), Jarvis runs headless and serves only Telegram. If no token is configured, the container exits.
+
 ## Configuration
 
 All configuration is stored in SQLite (not environment variables). The onboarding wizard handles initial setup. After that, use `/config` to change settings at runtime:
 
 ```
-/config                          Show all settings
-/config set llm_model <id>       Change main model
-/config set memory_llm_model <id> Change memory model (should be cheap)
-/config set llm_api_key <key>    Change API key
+/config                              Show all settings
+/config set llm_model <id>           Change main model
+/config set memory_llm_model <id>    Change memory model (should be cheap)
+/config set llm_api_key <key>        Change API key
+/config set telegram_token <token>   Set or change Telegram bot token
 ```
 
 ## Philosophy

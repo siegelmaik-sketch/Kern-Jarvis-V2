@@ -135,6 +135,19 @@ def _validate_api_key(provider: str, api_key: str) -> bool:
     return True
 
 
+def _validate_telegram_token(token: str) -> bool:
+    """Test ob der Telegram-Token gültig ist via getMe."""
+    try:
+        r = httpx.get(
+            f"https://api.telegram.org/bot{token}/getMe",
+            timeout=10,
+        )
+        return r.status_code == 200 and r.json().get("ok") is True
+    except (httpx.HTTPError, httpx.TimeoutException) as e:
+        log.warning("Telegram token validation failed: %s", e)
+        return False
+
+
 def run_onboarding() -> None:
     try:
         _do_onboarding()
@@ -229,6 +242,33 @@ def _do_onboarding() -> None:
         embedding_model_id = _choose(EMBEDDING_MODELS)
     set_config("embedding_model", embedding_model_id)
 
+    # ── Telegram (optional) ──────────────────────────────────────────────
+    print("\n" + "─" * 60)
+    print("  Telegram-Integration (optional)")
+    print("─" * 60)
+    print("  Du kannst Jarvis über Telegram schreiben statt über das Terminal.")
+    print()
+    print("  So bekommst du einen Bot-Token:")
+    print("  1. Öffne Telegram und schreibe @BotFather")
+    print("  2. Sende: /newbot")
+    print("  3. Wähle einen Namen (z.B. 'Mein Jarvis')")
+    print("  4. Wähle einen Username (muss auf 'bot' enden, z.B. 'mein_jarvis_bot')")
+    print("  5. BotFather gibt dir einen Token — den hier einfügen")
+    print()
+    telegram_token = input("  Telegram Bot-Token (Enter zum Überspringen): -> ").strip()
+
+    telegram_configured = False
+    if telegram_token:
+        print("  Prüfe Token...", end=" ", flush=True)
+        if _validate_telegram_token(telegram_token):
+            print("OK")
+            set_config("telegram_token", telegram_token)
+            telegram_configured = True
+        else:
+            print("UNGÜLTIG")
+            print("  Token wurde nicht akzeptiert. Setze ihn später mit:")
+            print("  /config set telegram_token <token>")
+
     # ── Abschluss ────────────────────────────────────────────────────────
     if not api_key_saved:
         print("\n  WARNUNG: Kein API-Key gespeichert!")
@@ -244,6 +284,7 @@ def _do_onboarding() -> None:
     print(f"  Haupt-Modell:    {model_id}")
     print(f"  Memory-Modell:   {memory_model_id}")
     print(f"  Embedding-Modell:{embedding_model_id}")
+    print(f"  Telegram:        {'aktiv' if telegram_configured else 'nicht eingerichtet'}")
     print("=" * 60)
     print()
     print("Ich starte jetzt. Du kannst mich alles fragen.")
@@ -254,5 +295,7 @@ def _do_onboarding() -> None:
     print("  /config set llm_model <modell-id>")
     print("  /config set memory_llm_model <modell-id>")
     print("  /config set embedding_model <modell-id>")
+    if not telegram_configured:
+        print("  /config set telegram_token <token>")
     print()
     input("Weiter mit Enter...")

@@ -69,9 +69,10 @@ def print_memory() -> None:
 _VALID_CONFIG_KEYS = {
     "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
     "embedding_api_key", "llm_api_key", "user_name", "language",
+    "telegram_token", "telegram_chat_id",
 }
 
-_SECRET_KEYS = {"llm_api_key", "embedding_api_key"}
+_SECRET_KEYS = {"llm_api_key", "embedding_api_key", "telegram_token"}
 
 
 def _mask_value(key: str, value: str) -> str:
@@ -111,6 +112,11 @@ def print_config(args: str) -> None:
         # Invalidate client cache on provider/key changes
         if key in ("llm_provider", "llm_api_key"):
             invalidate_client_cache()
+        # Start Telegram bot live if token is set
+        if key == "telegram_token":
+            from kern.telegram import start as start_telegram
+            start_telegram(value)
+            print("  Telegram bot gestartet.\n")
         # Mask secret values in output
         display_value = _mask_value(key, value)
         print(f"  {key} -> {display_value}\n")

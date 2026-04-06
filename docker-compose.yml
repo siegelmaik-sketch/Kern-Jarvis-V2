@@ -1,0 +1,12 @@
+services:
+  kern-jarvis-v2:
+    build: .
+    container_name: domenico-jarvis
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data        # SQLite DB + State
+      - ./tools:/app/tools      # Self-built tools persist
+    environment:
+      - PYTHONUNBUFFERED=1

@@ -45,7 +45,7 @@ def extract_code_block(text: str) -> str | None:
     return None
 
 
-def build_tool(tool_name: str, description: str, task: str) -> dict:
+def build_tool(tool_name: str, description: str, task: str, auto_confirm: bool = False) -> dict:
     from kern.brain import chat
 
     log.info("Building tool: %s", tool_name)
@@ -72,10 +72,13 @@ def build_tool(tool_name: str, description: str, task: str) -> dict:
     if len(code.split("\n")) > 15:
         print(f"  ... ({len(code.split(chr(10)))} Zeilen gesamt)")
 
-    try:
-        confirm = input("\n  Tool speichern und testen? [J/n] -> ").strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        return {"success": False, "error": "Abgebrochen"}
+    if auto_confirm:
+        confirm = "j"
+    else:
+        try:
+            confirm = input("\n  Tool speichern und testen? [J/n] -> ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return {"success": False, "error": "Abgebrochen"}
 
     if confirm in ("n", "nein", "no"):
         return {"success": False, "error": "Vom User abgelehnt"}
@@ -209,14 +212,14 @@ def parse_jarvis_commands(text: str) -> list[dict]:
     return commands
 
 
-def execute_commands(commands: list[dict]) -> list[dict]:
+def execute_commands(commands: list[dict], auto_confirm: bool = False) -> list[dict]:
     from kern.memory import memory_save, search_fact_by_key, search_facts
     results: list[dict] = []
 
     for cmd in commands:
         try:
             if cmd["type"] == "build_tool":
-                result = build_tool(cmd["name"], cmd["description"], cmd["task"])
+                result = build_tool(cmd["name"], cmd["description"], cmd["task"], auto_confirm=auto_confirm)
                 results.append(result)
 
             elif cmd["type"] == "register_tool":

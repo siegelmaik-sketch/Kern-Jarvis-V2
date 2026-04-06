@@ -33,15 +33,22 @@ EMBEDDING_DIMS = 1024
 # ── Embedding Client ─────────────────────────────────────────────────────────
 
 _embed_client: httpx.Client | None = None
+_embed_client_key: str = ""
 _embed_lock = threading.Lock()
 
 
 def _get_embed_client() -> httpx.Client:
-    global _embed_client
+    global _embed_client, _embed_client_key
+    api_key = get_config("embedding_api_key") or get_config("llm_api_key", "")
     with _embed_lock:
-        if _embed_client is not None and not _embed_client.is_closed:
+        if (
+            _embed_client is not None
+            and not _embed_client.is_closed
+            and _embed_client_key == api_key
+        ):
             return _embed_client
-        api_key = get_config("embedding_api_key") or get_config("llm_api_key", "")
+        if _embed_client is not None and not _embed_client.is_closed:
+            _embed_client.close()
         _embed_client = httpx.Client(
             timeout=30,
             headers={
@@ -49,6 +56,7 @@ def _get_embed_client() -> httpx.Client:
                 "Content-Type": "application/json",
             },
         )
+        _embed_client_key = api_key
         return _embed_client
 
 
