@@ -69,10 +69,10 @@ def print_memory() -> None:
 _VALID_CONFIG_KEYS = {
     "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
     "embedding_api_key", "llm_api_key", "user_name", "language",
-    "telegram_token", "telegram_chat_id",
+    "telegram_token", "telegram_chat_id", "whisper_api_key",
 }
 
-_SECRET_KEYS = {"llm_api_key", "embedding_api_key", "telegram_token"}
+_SECRET_KEYS = {"llm_api_key", "embedding_api_key", "telegram_token", "whisper_api_key"}
 
 
 def _mask_value(key: str, value: str) -> str:

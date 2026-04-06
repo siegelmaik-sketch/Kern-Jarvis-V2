@@ -1,6 +1,6 @@
 """
 Kern-Jarvis V2 — Telegram Bot Interface
-Long-polling, single-user.
+Long-polling, single-user, with voice message transcription via Whisper.
 """
 import logging
 import threading
@@ -18,6 +18,7 @@ from kern.tools import build_tools_manifest
 log = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
+_FILE_BASE = "https://api.telegram.org/file/bot{token}/{path}"
 _process_lock = threading.Lock()
 _bot_thread: threading.Thread | None = None
 
@@ -44,6 +45,47 @@ def _is_authorized(chat_id: int) -> bool:
         log.info("Telegram: first contact authorized, chat_id=%s", chat_id)
         return True
     return str(chat_id) == stored
+
+
+def _transcribe_voice(token: str, file_id: str) -> str | None:
+    """Download a Telegram voice/audio file and transcribe it via OpenAI Whisper."""
+    whisper_key = get_config("whisper_api_key")
+    if not whisper_key:
+        log.warning("Whisper API key not configured")
+        return None
+
+    try:
+        # Get file path from Telegram
+        file_info = httpx.get(
+            f"https://api.telegram.org/bot{token}/getFile",
+            params={"file_id": file_id},
+            timeout=10,
+        )
+        file_info.raise_for_status()
+        file_path = file_info.json()["result"]["file_path"]
+
+        # Download audio
+        audio_resp = httpx.get(
+            _FILE_BASE.format(token=token, path=file_path),
+            timeout=30,
+        )
+        audio_resp.raise_for_status()
+        audio_data = audio_resp.content
+
+        # Transcribe via Whisper
+        transcription = httpx.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {whisper_key}"},
+            files={"file": ("voice.ogg", audio_data, "audio/ogg")},
+            data={"model": "whisper-1"},
+            timeout=30,
+        )
+        transcription.raise_for_status()
+        return transcription.json().get("text", "").strip()
+
+    except Exception as e:
+        log.error("Voice transcription failed: %s", e)
+        return None
 
 
 def _process_message(token: str, chat_id: int, text: str) -> None:
@@ -93,6 +135,53 @@ def _process_message(token: str, chat_id: int, text: str) -> None:
         ).start()
 
 
+def _handle_update(token: str, update: dict) -> None:
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return
+
+    chat_id = msg.get("chat", {}).get("id")
+    if not chat_id:
+        return
+
+    if not _is_authorized(chat_id):
+        log.warning("Telegram: unauthorized chat_id=%s", chat_id)
+        _send(token, chat_id, "Nicht autorisiert.")
+        return
+
+    # Text message
+    text = msg.get("text", "").strip()
+    if text:
+        threading.Thread(
+            target=_process_message,
+            args=(token, chat_id, text),
+            daemon=True,
+        ).start()
+        return
+
+    # Voice or audio message
+    voice = msg.get("voice") or msg.get("audio")
+    if voice:
+        file_id = voice.get("file_id")
+        if not file_id:
+            return
+
+        if not get_config("whisper_api_key"):
+            _send(token, chat_id, "Sprachnachrichten sind noch nicht eingerichtet.")
+            return
+
+        _send(token, chat_id, "🎙 Transkribiere...")
+        transcript = _transcribe_voice(token, file_id)
+        if transcript:
+            threading.Thread(
+                target=_process_message,
+                args=(token, chat_id, f"[Sprachnachricht]: {transcript}"),
+                daemon=True,
+            ).start()
+        else:
+            _send(token, chat_id, "Sprachnachricht konnte nicht transkribiert werden.")
+
+
 def _extract_memory(user_input: str, response: str) -> None:
     try:
         extract_from_conversation(user_input, response)
@@ -108,20 +197,9 @@ def _poll_loop(token: str) -> None:
             data = _api(token, "getUpdates", offset=offset, timeout=30)
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
-                msg = update.get("message") or update.get("edited_message")
-                if not msg:
-                    continue
-                text = msg.get("text", "").strip()
-                chat_id = msg.get("chat", {}).get("id")
-                if not text or not chat_id:
-                    continue
-                if not _is_authorized(chat_id):
-                    log.warning("Telegram: unauthorized chat_id=%s", chat_id)
-                    _send(token, chat_id, "Nicht autorisiert.")
-                    continue
                 threading.Thread(
-                    target=_process_message,
-                    args=(token, chat_id, text),
+                    target=_handle_update,
+                    args=(token, update),
                     daemon=True,
                 ).start()
         except httpx.TimeoutException:
