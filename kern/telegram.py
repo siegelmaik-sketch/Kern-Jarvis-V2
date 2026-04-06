@@ -1,6 +1,7 @@
 """
 Kern-Jarvis V2 — Telegram Bot Interface
-Long-polling, single-user, with voice message transcription via Whisper.
+Long-polling, single-user, with voice message transcription (Whisper)
+and voice replies (OpenAI TTS).
 """
 import logging
 import threading
@@ -22,6 +23,9 @@ _FILE_BASE = "https://api.telegram.org/file/bot{token}/{path}"
 _process_lock = threading.Lock()
 _bot_thread: threading.Thread | None = None
 
+# Max chars sent to TTS — long responses get truncated for voice
+_TTS_MAX_CHARS = 1000
+
 
 def _api(token: str, method: str, **params) -> dict:
     url = _API_BASE.format(token=token, method=method)
@@ -36,6 +40,18 @@ def _send(token: str, chat_id: int, text: str) -> None:
             _api(token, "sendMessage", chat_id=chat_id, text=text[i:i + 4096])
         except Exception as e:
             log.error("Telegram sendMessage failed: %s", e)
+
+
+def _send_voice(token: str, chat_id: int, audio: bytes) -> None:
+    try:
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendVoice",
+            data={"chat_id": str(chat_id)},
+            files={"voice": ("reply.ogg", audio, "audio/ogg")},
+            timeout=30,
+        )
+    except Exception as e:
+        log.error("Telegram sendVoice failed: %s", e)
 
 
 def _is_authorized(chat_id: int) -> bool:
@@ -55,7 +71,6 @@ def _transcribe_voice(token: str, file_id: str) -> str | None:
         return None
 
     try:
-        # Get file path from Telegram
         file_info = httpx.get(
             f"https://api.telegram.org/bot{token}/getFile",
             params={"file_id": file_id},
@@ -64,19 +79,16 @@ def _transcribe_voice(token: str, file_id: str) -> str | None:
         file_info.raise_for_status()
         file_path = file_info.json()["result"]["file_path"]
 
-        # Download audio
         audio_resp = httpx.get(
             _FILE_BASE.format(token=token, path=file_path),
             timeout=30,
         )
         audio_resp.raise_for_status()
-        audio_data = audio_resp.content
 
-        # Transcribe via Whisper
         transcription = httpx.post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {whisper_key}"},
-            files={"file": ("voice.ogg", audio_data, "audio/ogg")},
+            files={"file": ("voice.ogg", audio_resp.content, "audio/ogg")},
             data={"model": "whisper-1"},
             timeout=30,
         )
@@ -88,7 +100,45 @@ def _transcribe_voice(token: str, file_id: str) -> str | None:
         return None
 
 
-def _process_message(token: str, chat_id: int, text: str) -> None:
+def _synthesize_speech(text: str) -> bytes | None:
+    """Convert text to speech via OpenAI TTS. Returns OGG/opus bytes."""
+    api_key = get_config("whisper_api_key")
+    if not api_key:
+        log.warning("TTS: whisper_api_key not configured")
+        return None
+
+    voice = get_config("tts_voice", "nova")
+    tts_text = text[:_TTS_MAX_CHARS]
+
+    try:
+        r = httpx.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "tts-1",
+                "input": tts_text,
+                "voice": voice,
+                "response_format": "opus",
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.content
+    except Exception as e:
+        log.error("TTS synthesis failed: %s", e)
+        return None
+
+
+def _should_reply_with_voice(triggered_by_voice: bool) -> bool:
+    mode = get_config("telegram_voice_replies", "auto")
+    if mode == "always":
+        return True
+    if mode == "auto":
+        return triggered_by_voice
+    return False
+
+
+def _process_message(token: str, chat_id: int, text: str, reply_with_voice: bool = False) -> None:
     with _process_lock:
         append_message({"role": "user", "content": text})
 
@@ -106,7 +156,19 @@ def _process_message(token: str, chat_id: int, text: str) -> None:
             return
 
         append_message({"role": "assistant", "content": response})
-        _send(token, chat_id, response)
+
+        if _should_reply_with_voice(reply_with_voice):
+            audio = _synthesize_speech(response)
+            if audio:
+                _send_voice(token, chat_id, audio)
+                # Send text too if response was truncated for TTS
+                if len(response) > _TTS_MAX_CHARS:
+                    _send(token, chat_id, response)
+            else:
+                # TTS failed — fall back to text
+                _send(token, chat_id, response)
+        else:
+            _send(token, chat_id, response)
 
         commands = parse_jarvis_commands(response)
         if commands:
@@ -154,7 +216,7 @@ def _handle_update(token: str, update: dict) -> None:
     if text:
         threading.Thread(
             target=_process_message,
-            args=(token, chat_id, text),
+            args=(token, chat_id, text, False),
             daemon=True,
         ).start()
         return
@@ -175,7 +237,7 @@ def _handle_update(token: str, update: dict) -> None:
         if transcript:
             threading.Thread(
                 target=_process_message,
-                args=(token, chat_id, f"[Sprachnachricht]: {transcript}"),
+                args=(token, chat_id, f"[Sprachnachricht]: {transcript}", True),
                 daemon=True,
             ).start()
         else:

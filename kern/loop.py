@@ -70,6 +70,7 @@ _VALID_CONFIG_KEYS = {
     "llm_provider", "llm_model", "memory_llm_model", "embedding_model",
     "embedding_api_key", "llm_api_key", "user_name", "language",
     "telegram_token", "telegram_chat_id", "whisper_api_key",
+    "tts_voice", "telegram_voice_replies",
 }
 
 _SECRET_KEYS = {"llm_api_key", "embedding_api_key", "telegram_token", "whisper_api_key"}
