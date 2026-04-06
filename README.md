@@ -24,7 +24,48 @@ Task → Tool available? → execute
 - **SQLite** — no external database required
 - **Onboarding** — guided setup on first launch
 
+---
+
 ## Installation
+
+### Option A — Docker (recommended)
+
+```bash
+git clone https://github.com/siegelmaik-sketch/Kern-Jarvis-V2.git
+cd Kern-Jarvis-V2
+docker compose run --rm kern-jarvis-v2
+```
+
+The first run starts the onboarding wizard. After setup, run detached:
+
+```bash
+docker compose up -d
+```
+
+**What persists across container restarts:**
+
+| Path (host) | Content |
+|---|---|
+| `./data/jarvis.db` | All config, memory, facts, tools registry |
+| `./tools/*.py` | Self-built tool scripts |
+
+> If you want a fresh start: `rm data/jarvis.db` and re-run onboarding.
+
+**Deploying multiple instances** (one per user):
+
+```bash
+cp -r Kern-Jarvis-V2 Alice-Jarvis
+# edit Alice-Jarvis/docker-compose.yml → set container_name: alice-jarvis
+cd Alice-Jarvis && docker compose run --rm alice-jarvis
+```
+
+Each instance has its own `data/` and `tools/` — fully isolated.
+
+---
+
+### Option B — Local (no Docker)
+
+Requires Python 3.12+.
 
 ```bash
 git clone https://github.com/siegelmaik-sketch/Kern-Jarvis-V2.git
@@ -33,14 +74,44 @@ pip install -r requirements.txt
 python3 -m kern
 ```
 
-On first launch, Jarvis guides you through setup (name, language, LLM provider, API key, model selection).
-
 For development:
 
 ```bash
 pip install -r requirements-dev.txt
 python3 -m pytest tests/ -v
 ```
+
+---
+
+## Telegram Setup
+
+Jarvis can receive and answer messages via Telegram. The onboarding wizard will ask for a bot token. If you skip it, set it up later.
+
+**1. Create a bot via BotFather**
+
+1. Open Telegram and search for `@BotFather`
+2. Send `/newbot`
+3. Choose a display name (e.g. `My Jarvis`)
+4. Choose a username — must end in `bot` (e.g. `my_jarvis_bot`)
+5. BotFather replies with a token like `1234567890:AAH...`
+
+**2. Set the token**
+
+During onboarding (prompted automatically), or at any time inside Jarvis:
+
+```
+/config set telegram_token <your-token>
+```
+
+The bot starts immediately — no restart needed.
+
+**Authorization:** The first person to message the bot is automatically authorized. All subsequent messages from different chat IDs are rejected. To reset: `/config set telegram_chat_id <new-id>`.
+
+**Headless mode (Docker detached):**
+
+When running without an attached terminal (`docker compose up -d`), Jarvis runs headless and serves only Telegram. If no token is configured in this mode, the container exits with an error.
+
+---
 
 ## Supported Providers
 
@@ -50,7 +121,9 @@ python3 -m pytest tests/ -v
 | OpenAI | gpt-4o, gpt-4o-mini |
 | OpenRouter | All available models |
 
-Embeddings run via OpenRouter regardless of your main provider.
+Embeddings always run via OpenRouter regardless of your main provider.
+
+---
 
 ## Commands
 
@@ -59,10 +132,27 @@ Embeddings run via OpenRouter regardless of your main provider.
 /tools    Show all registered tools
 /memory   Show memory contents
 /search   Semantic search over memory (e.g. /search Bitcoin)
-/config   Show or change configuration (e.g. /config set llm_model ...)
+/config   Show or change configuration
 /reset    Clear message history (facts are preserved)
 /exit     Quit
 ```
+
+---
+
+## Configuration
+
+All configuration is stored in SQLite — not in environment variables or config files. The onboarding wizard handles initial setup. Change anything at runtime with `/config`:
+
+```
+/config                              Show all settings
+/config set llm_model <id>           Change main model
+/config set memory_llm_model <id>    Change memory model (should be cheap)
+/config set llm_api_key <key>        Change API key
+/config set telegram_token <token>   Set or change Telegram bot token
+/config set telegram_chat_id <id>    Override authorized Telegram chat ID
+```
+
+---
 
 ## Structure
 
@@ -83,48 +173,18 @@ kern/
 prompts/kern.md      Static core prompt
 tools/               Self-built tools (gitignored)
 data/                SQLite database (gitignored)
-tests/               171 tests
+Dockerfile           Container image definition
+docker-compose.yml   Single-instance compose setup
+tests/               Test suite
 ```
 
-## Telegram Setup
-
-Jarvis can receive and answer messages via Telegram. The onboarding wizard will ask for a bot token. If you skip it, set it up later:
-
-**1. Create a bot via BotFather**
-1. Open Telegram and search for `@BotFather`
-2. Send `/newbot`
-3. Choose a display name (e.g. `My Jarvis`)
-4. Choose a username — must end in `bot` (e.g. `my_jarvis_bot`)
-5. BotFather replies with a token like `1234567890:AAH...`
-
-**2. Set the token**
-
-During onboarding (prompted automatically), or at any time:
-```
-/config set telegram_token <your-token>
-```
-
-The bot starts immediately — no restart needed. The first person to send a message to the bot will be authorized automatically. Every subsequent message from a different chat ID is rejected.
-
-**Docker / headless mode**
-
-When running without a terminal (e.g. `docker compose up -d`), Jarvis runs headless and serves only Telegram. If no token is configured, the container exits.
-
-## Configuration
-
-All configuration is stored in SQLite (not environment variables). The onboarding wizard handles initial setup. After that, use `/config` to change settings at runtime:
-
-```
-/config                              Show all settings
-/config set llm_model <id>           Change main model
-/config set memory_llm_model <id>    Change memory model (should be cheap)
-/config set llm_api_key <key>        Change API key
-/config set telegram_token <token>   Set or change Telegram bot token
-```
+---
 
 ## Philosophy
 
 Jarvis is not a wrapper — it's a system that grows with you. Every tool it builds, every correction you give, every context you share is retained permanently. Tokens are saved by offloading repeatable tasks to tools instead of calling the LLM every time.
+
+---
 
 ## License
 
