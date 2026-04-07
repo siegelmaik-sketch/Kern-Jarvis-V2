@@ -1,30 +1,7 @@
-"""Tests for kern.tool_builder — command parsing, code extraction, execution."""
+"""Tests for kern.tool_builder — command parsing, execution dispatch."""
 import json
 import pytest
 from unittest.mock import patch, MagicMock
-
-
-class TestExtractCodeBlock:
-    def test_python_block(self):
-        from kern.tool_builder import extract_code_block
-        text = "Here is the code:\n```python\ndef main(): pass\n```"
-        assert extract_code_block(text) == "def main(): pass"
-
-    def test_plain_block(self):
-        from kern.tool_builder import extract_code_block
-        text = "```\nprint('hi')\n```"
-        assert extract_code_block(text) == "print('hi')"
-
-    def test_no_block(self):
-        from kern.tool_builder import extract_code_block
-        assert extract_code_block("just text") is None
-
-    def test_multiline(self):
-        from kern.tool_builder import extract_code_block
-        text = '```python\nimport os\n\ndef main(args):\n    return {"success": True}\n```'
-        code = extract_code_block(text)
-        assert "import os" in code
-        assert "def main" in code
 
 
 class TestParseJarvisCommands:
@@ -215,23 +192,3 @@ class TestExecuteCommands:
         assert results[1]["success"] is True
 
 
-class TestRunToolSafe:
-    def test_successful_execution(self):
-        from kern.tool_builder import run_tool_temp
-        code = "def main(args): return {'success': True, 'result': 'hello'}\n"
-        result = run_tool_temp("test", code, {})
-        assert result["success"] is True
-        assert result["result"] == "hello"
-
-    def test_execution_error(self):
-        from kern.tool_builder import run_tool_temp
-        code = "def main(args): raise RuntimeError('boom')\n"
-        result = run_tool_temp("test", code, {})
-        assert result["success"] is False
-        assert "boom" in result["error"]
-
-    def test_syntax_error(self):
-        from kern.tool_builder import run_tool_temp
-        code = "def main(args):\n    +++invalid syntax\n"
-        result = run_tool_temp("test", code, {})
-        assert result["success"] is False

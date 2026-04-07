@@ -1,8 +1,21 @@
 """Tests for kern.web — SearXNG search + URL fetch with mocked httpx."""
+import time
+
 import pytest
 from unittest.mock import patch, MagicMock
 
 import httpx
+
+
+@pytest.fixture(autouse=True)
+def _disable_cache_by_default(db_path):
+    """
+    Disable web_cache by default for the search tests in this file. The
+    cache is opt-in tested separately in TestWebCache.
+    Depends on db_path so the config table exists.
+    """
+    from kern.db import set_config
+    set_config("web_cache_ttl", "0")
 
 
 # ── web_search ────────────────────────────────────────────────────────────────
@@ -286,6 +299,135 @@ class TestWebFetch:
         with patch("kern.web.httpx.Client", return_value=mock_client):
             with pytest.raises(WebFetchError, match="extract"):
                 web_fetch("https://empty.example")
+
+
+# ── web_cache ─────────────────────────────────────────────────────────────────
+
+
+class TestWebCache:
+    def _mock_search_response(self, results: list[dict]) -> MagicMock:
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"results": results}
+        return mock_response
+
+    def test_second_call_hits_cache(self, db_path):
+        # Arrange
+        from kern.db import set_config
+        from kern.web import web_search
+        set_config("web_cache_ttl", "3600")
+
+        fake = self._mock_search_response([
+            {"title": "T", "url": "http://x", "content": "c", "engine": "e"}
+        ])
+
+        # Act
+        with patch("kern.web.httpx.get", return_value=fake) as mock_get:
+            r1 = web_search("foo")
+            r2 = web_search("foo")
+
+        # Assert
+        assert mock_get.call_count == 1  # second call served from cache
+        assert r1 == r2
+
+    def test_cache_respects_max_results_after_lookup(self, db_path):
+        # Arrange
+        from kern.db import set_config
+        from kern.web import web_search
+        set_config("web_cache_ttl", "3600")
+
+        fake = self._mock_search_response([
+            {"title": f"t{i}", "url": f"http://x/{i}", "content": "", "engine": "e"}
+            for i in range(10)
+        ])
+
+        # Act
+        with patch("kern.web.httpx.get", return_value=fake) as mock_get:
+            web_search("foo", max_results=10)        # primes cache with 10
+            r2 = web_search("foo", max_results=3)    # cache hit, slice to 3
+
+        # Assert
+        assert mock_get.call_count == 1
+        assert len(r2) == 3
+
+    def test_cache_separated_by_language(self, db_path):
+        # Arrange
+        from kern.db import set_config
+        from kern.web import web_search
+        set_config("web_cache_ttl", "3600")
+
+        fake = self._mock_search_response([
+            {"title": "T", "url": "http://x", "content": "c", "engine": "e"}
+        ])
+
+        # Act
+        with patch("kern.web.httpx.get", return_value=fake) as mock_get:
+            set_config("search_language", "de")
+            web_search("foo")
+            set_config("search_language", "en")
+            web_search("foo")
+
+        # Assert — different languages → two real requests
+        assert mock_get.call_count == 2
+
+    def test_cache_expires_after_ttl(self, db_path):
+        # Arrange
+        from kern.db import set_config
+        from kern.web import web_search
+        set_config("web_cache_ttl", "3600")
+
+        fake = self._mock_search_response([
+            {"title": "T", "url": "http://x", "content": "c", "engine": "e"}
+        ])
+
+        # Act — first call with current time, second after ttl expired
+        with patch("kern.web.httpx.get", return_value=fake) as mock_get:
+            web_search("foo")
+            # Force-expire the cache by rewriting created_at to the distant past
+            from kern.db import connection
+            with connection() as conn:
+                conn.execute("UPDATE web_cache SET created_at = 0")
+                conn.commit()
+            web_search("foo")
+
+        # Assert — both calls hit network
+        assert mock_get.call_count == 2
+
+    def test_ttl_zero_disables_cache(self, db_path):
+        # Arrange
+        from kern.db import set_config
+        from kern.web import web_search
+        set_config("web_cache_ttl", "0")
+
+        fake = self._mock_search_response([
+            {"title": "T", "url": "http://x", "content": "c", "engine": "e"}
+        ])
+
+        # Act
+        with patch("kern.web.httpx.get", return_value=fake) as mock_get:
+            web_search("foo")
+            web_search("foo")
+
+        # Assert — every call hits network
+        assert mock_get.call_count == 2
+
+    def test_cache_normalizes_whitespace_in_query(self, db_path):
+        # Arrange
+        from kern.db import set_config
+        from kern.web import web_search
+        set_config("web_cache_ttl", "3600")
+
+        fake = self._mock_search_response([
+            {"title": "T", "url": "http://x", "content": "c", "engine": "e"}
+        ])
+
+        # Act
+        with patch("kern.web.httpx.get", return_value=fake) as mock_get:
+            web_search("  foo bar  ")
+            web_search("foo bar")
+
+        # Assert — both queries normalize to "foo bar", second is cache hit
+        assert mock_get.call_count == 1
 
 
 # ── builtin tool dispatch ─────────────────────────────────────────────────────

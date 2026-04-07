@@ -75,5 +75,19 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_servers_name ON mcp_servers(name);
 
+-- ── Web Cache ──────────────────────────────────────────────────────────────
+-- Caches SearXNG query results for a configurable TTL (default 1h).
+-- Composite key (query, language) so DE/EN versions of the same query
+-- are stored separately.
+CREATE TABLE IF NOT EXISTS web_cache (
+    query TEXT NOT NULL,
+    language TEXT NOT NULL DEFAULT 'de',
+    results_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (query, language)
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_cache_created ON web_cache(created_at DESC);
+
 -- ── Config ─────────────────────────────────────────────────────────────────
 -- (already defined above)

@@ -219,6 +219,17 @@ def build_tools_manifest() -> str:
         for name, spec in BUILTIN_TOOLS.items():
             lines.append(f"- **{name}**: {spec['description']}")
         lines.append("")
+        lines.append(
+            "**Wann diese Tools nutzen:** Rufe `web_search` PROAKTIV mit "
+            "`RUN_TOOL(name='web_search', args={\"query\": \"...\"})` auf, sobald "
+            "der Nutzer nach aktuellen Informationen, Nachrichten, Wetter, "
+            "Preisen, Zeitplänen oder etwas fragt das du nicht sicher weißt. "
+            "Erfinde nichts — such nach. Bei Treffern, deren Snippet nicht "
+            "reicht, hole den Volltext mit "
+            "`RUN_TOOL(name='web_fetch', args={\"url\": \"...\"})`. "
+            "Suchergebnisse sind 1h lang gecacht, der Aufruf ist also billig."
+        )
+        lines.append("")
 
     local = list_tools()
     if local:
