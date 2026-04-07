@@ -280,6 +280,42 @@ def parse_jarvis_commands(text: str) -> list[dict]:
     return commands
 
 
+_JARVIS_CMD_NAMES = (
+    "RUN_TOOL", "BUILD_TOOL", "REGISTER_TOOL",
+    "MEMORY_SAVE", "MEMORY_GET", "MEMORY_SEARCH",
+)
+
+
+def strip_jarvis_commands(text: str) -> str:
+    """Remove JARVIS command calls from a response so they don't leak to the user.
+
+    The parser executes them separately — the user-facing surface (Telegram,
+    voice TTS) should never see the raw `RUN_TOOL(...)` blocks. Strips both
+    fenced ```tool_code``` blocks and bare command calls (with multi-line
+    args), then collapses any blank-line gaps left behind.
+    """
+    # Fenced code blocks tagged tool_code / tool_call / jarvis
+    text = re.sub(
+        r"```(?:tool_code|tool_call|jarvis)?\s*\n?"
+        r"(?:" + "|".join(_JARVIS_CMD_NAMES) + r")\b.*?```",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    # Bare command calls — match balanced parens roughly via non-greedy `.*?\)`
+    # plus a lookahead for end-of-line/text to avoid eating trailing prose.
+    cmd_alt = "|".join(_JARVIS_CMD_NAMES)
+    text = re.sub(
+        rf"(?:{cmd_alt})\s*\([^()]*(?:\([^()]*\)[^()]*)*\)",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+    # Collapse 3+ blank lines down to one and strip trailing whitespace
+    text = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", text)
+    return text.strip()
+
+
 def execute_commands(commands: list[dict], auto_confirm: bool = False) -> list[dict]:
     from kern.memory import memory_save, search_fact_by_key, search_facts
     results: list[dict] = []

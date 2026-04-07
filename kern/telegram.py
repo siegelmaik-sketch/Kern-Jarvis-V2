@@ -13,7 +13,7 @@ from kern.brain import build_system_prompt, chat
 from kern.db import get_config, set_config
 from kern.implicit_memory import extract_from_conversation
 from kern.memory import append_message, build_memory_context, load_context, update_conversation_topic
-from kern.tool_builder import execute_commands, parse_jarvis_commands
+from kern.tool_builder import execute_commands, parse_jarvis_commands, strip_jarvis_commands
 from kern.tools import build_tools_manifest
 
 log = logging.getLogger(__name__)
@@ -157,18 +157,22 @@ def _process_message(token: str, chat_id: int, text: str, reply_with_voice: bool
 
         append_message({"role": "assistant", "content": response})
 
+        # Hide JARVIS command syntax from the user-facing channel — the
+        # parser still sees the raw response below.
+        user_visible = strip_jarvis_commands(response)
+
         if _should_reply_with_voice(reply_with_voice):
-            audio = _synthesize_speech(response)
+            audio = _synthesize_speech(user_visible)
             if audio:
                 _send_voice(token, chat_id, audio)
                 # Send text too if response was truncated for TTS
-                if len(response) > _TTS_MAX_CHARS:
-                    _send(token, chat_id, response)
+                if len(user_visible) > _TTS_MAX_CHARS:
+                    _send(token, chat_id, user_visible)
             else:
                 # TTS failed — fall back to text
-                _send(token, chat_id, response)
-        else:
-            _send(token, chat_id, response)
+                _send(token, chat_id, user_visible)
+        elif user_visible:
+            _send(token, chat_id, user_visible)
 
         commands = parse_jarvis_commands(response)
         if commands:

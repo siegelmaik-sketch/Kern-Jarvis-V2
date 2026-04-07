@@ -4,6 +4,60 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
+class TestStripJarvisCommands:
+    def test_removes_fenced_tool_code_block(self):
+        from kern.tool_builder import strip_jarvis_commands
+        text = 'Okay\n```tool_code\nRUN_TOOL(name="x", args={"a": 1})\n```\nFertig.'
+        result = strip_jarvis_commands(text)
+        assert "RUN_TOOL" not in result
+        assert "tool_code" not in result
+        assert "Okay" in result
+        assert "Fertig." in result
+
+    def test_removes_bare_command(self):
+        from kern.tool_builder import strip_jarvis_commands
+        text = 'Hi. MEMORY_SAVE(type="user", key="name", value="Maik") Tschüss.'
+        result = strip_jarvis_commands(text)
+        assert "MEMORY_SAVE" not in result
+        assert "Hi." in result
+        assert "Tschüss." in result
+
+    def test_removes_all_command_types(self):
+        from kern.tool_builder import strip_jarvis_commands
+        text = (
+            'A RUN_TOOL(name="x") B BUILD_TOOL(name="y", description="z", task="t") '
+            'C REGISTER_TOOL(name="a", description="b", script_path="c") '
+            'D MEMORY_SAVE(type="user", key="k", value="v") '
+            'E MEMORY_GET(key="k") F MEMORY_SEARCH(query="q") G'
+        )
+        result = strip_jarvis_commands(text)
+        for cmd in ["RUN_TOOL", "BUILD_TOOL", "REGISTER_TOOL", "MEMORY_SAVE", "MEMORY_GET", "MEMORY_SEARCH"]:
+            assert cmd not in result
+        for letter in ["A", "B", "C", "D", "E", "F", "G"]:
+            assert letter in result
+
+    def test_passthrough_plain_text(self):
+        from kern.tool_builder import strip_jarvis_commands
+        text = "Just a normal response with no commands."
+        assert strip_jarvis_commands(text) == text
+
+    def test_collapses_blank_lines_left_behind(self):
+        from kern.tool_builder import strip_jarvis_commands
+        text = 'Top\n\n```tool_code\nRUN_TOOL(name="x")\n```\n\nBottom'
+        result = strip_jarvis_commands(text)
+        assert "\n\n\n" not in result
+
+    def test_does_not_break_parser(self):
+        """Stripping is a separate concern — parse_jarvis_commands still sees raw text."""
+        from kern.tool_builder import strip_jarvis_commands, parse_jarvis_commands
+        text = '```tool_code\nRUN_TOOL(name="x", args={"a": 1})\n```'
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        # Stripper is a transformer on its own — caller decides which to use
+        stripped = strip_jarvis_commands(text)
+        assert "RUN_TOOL" not in stripped
+
+
 class TestParseJarvisCommands:
     def test_register_tool(self):
         from kern.tool_builder import parse_jarvis_commands
