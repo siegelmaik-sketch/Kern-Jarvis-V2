@@ -154,11 +154,23 @@ def build_tool(tool_name: str, description: str, task: str, auto_confirm: bool =
 
 
 def parse_jarvis_commands(text: str) -> list[dict]:
+    """
+    Extract JARVIS command calls from an LLM response.
+
+    Tolerates both single-line and multi-line formatting — models often
+    pretty-print calls across multiple lines when they have several args
+    (`name=...,\\n    args=...`), so every regex uses `\\s*` instead of a
+    literal space and runs with `re.DOTALL`.
+    """
     commands: list[dict] = []
+    ws = r"\s*"  # shorthand: optional whitespace incl. newlines
 
     register_matches = re.finditer(
-        r"REGISTER_TOOL\(name=['\"](.+?)['\"],\s*description=['\"](.+?)['\"],\s*script_path=['\"](.+?)['\"]\)",
-        text
+        rf"REGISTER_TOOL\({ws}name{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
+        rf"description{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
+        rf"script_path{ws}={ws}['\"](.+?)['\"]{ws}\)",
+        text,
+        re.DOTALL,
     )
     for m in register_matches:
         commands.append({
@@ -169,9 +181,11 @@ def parse_jarvis_commands(text: str) -> list[dict]:
         })
 
     build_matches = re.finditer(
-        r"BUILD_TOOL\(name=['\"](.+?)['\"],\s*description=['\"](.+?)['\"],\s*task=['\"](.+?)['\"]\)",
+        rf"BUILD_TOOL\({ws}name{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
+        rf"description{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
+        rf"task{ws}={ws}['\"](.+?)['\"]{ws}\)",
         text,
-        re.DOTALL
+        re.DOTALL,
     )
     for m in build_matches:
         commands.append({
@@ -182,9 +196,11 @@ def parse_jarvis_commands(text: str) -> list[dict]:
         })
 
     memory_save_matches = re.finditer(
-        r"MEMORY_SAVE\(type=['\"](.+?)['\"],\s*key=['\"](.+?)['\"],\s*value=['\"](.+?)['\"]\)",
+        rf"MEMORY_SAVE\({ws}type{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
+        rf"key{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
+        rf"value{ws}={ws}['\"](.+?)['\"]{ws}\)",
         text,
-        re.DOTALL
+        re.DOTALL,
     )
     for m in memory_save_matches:
         commands.append({
@@ -195,8 +211,9 @@ def parse_jarvis_commands(text: str) -> list[dict]:
         })
 
     memory_get_matches = re.finditer(
-        r"MEMORY_GET\(key=['\"](.+?)['\"]\)",
+        rf"MEMORY_GET\({ws}key{ws}={ws}['\"](.+?)['\"]{ws}\)",
         text,
+        re.DOTALL,
     )
     for m in memory_get_matches:
         commands.append({
@@ -205,8 +222,9 @@ def parse_jarvis_commands(text: str) -> list[dict]:
         })
 
     memory_search_matches = re.finditer(
-        r"MEMORY_SEARCH\(query=['\"](.+?)['\"]\)",
+        rf"MEMORY_SEARCH\({ws}query{ws}={ws}['\"](.+?)['\"]{ws}\)",
         text,
+        re.DOTALL,
     )
     for m in memory_search_matches:
         commands.append({
@@ -215,9 +233,10 @@ def parse_jarvis_commands(text: str) -> list[dict]:
         })
 
     run_matches = re.finditer(
-        r"RUN_TOOL\(name=['\"](.+?)['\"](?:,\s*args=(\{.+?\}))?\)",
+        rf"RUN_TOOL\({ws}name{ws}={ws}['\"](.+?)['\"]"
+        rf"(?:{ws},{ws}args{ws}={ws}(\{{.+?\}}))?{ws}\)",
         text,
-        re.DOTALL
+        re.DOTALL,
     )
     for m in run_matches:
         args: dict = {}

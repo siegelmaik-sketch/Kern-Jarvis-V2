@@ -84,6 +84,35 @@ class TestParseJarvisCommands:
         assert len(cmds) == 1
         assert cmds[0]["value"] == "Maik"
 
+    def test_multiline_run_tool(self):
+        """LLMs often pretty-print calls across multiple lines."""
+        from kern.tool_builder import parse_jarvis_commands
+        text = (
+            'RUN_TOOL(\n'
+            '    name="web_search",\n'
+            '    args={"query": "Wetter Aue morgen", "max_results": 3}\n'
+            ')'
+        )
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        assert cmds[0]["type"] == "run_tool"
+        assert cmds[0]["name"] == "web_search"
+        assert cmds[0]["args"]["query"] == "Wetter Aue morgen"
+
+    def test_multiline_build_tool(self):
+        from kern.tool_builder import parse_jarvis_commands
+        text = (
+            "BUILD_TOOL(\n"
+            "    name='wetter',\n"
+            "    description='Wetterbericht für Aue',\n"
+            "    task='Hole das aktuelle Wetter für Aue von open-meteo.com'\n"
+            ")"
+        )
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        assert cmds[0]["type"] == "build_tool"
+        assert cmds[0]["name"] == "wetter"
+
 
 class TestExecuteCommands:
     def test_memory_save(self, db_path, mock_embedding):
