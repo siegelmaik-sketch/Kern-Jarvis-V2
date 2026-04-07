@@ -289,6 +289,25 @@ class TestMemorySave:
         assert "Maik" in facts[0]["fact"]
         assert facts[0]["category"] == "preference"
 
+    def test_upsert_replaces_old_value_for_same_key(self, db_path, mock_embedding):
+        """A correction (same key, new value) must replace, not duplicate."""
+        from kern.memory import memory_save, get_facts
+        memory_save("user", "wohnort", "Aue")
+        memory_save("user", "wohnort", "Chemnitz")
+        facts = get_facts()
+        wohnort_facts = [f for f in facts if "[wohnort]" in f["fact"]]
+        assert len(wohnort_facts) == 1
+        assert "Chemnitz" in wohnort_facts[0]["fact"]
+        assert "Aue" not in wohnort_facts[0]["fact"]
+
+    def test_upsert_only_within_same_category(self, db_path, mock_embedding):
+        """Same key in different category should NOT be touched."""
+        from kern.memory import memory_save, get_facts
+        memory_save("user", "status", "aktiv")
+        memory_save("project", "status", "in_progress")
+        facts = get_facts()
+        assert len(facts) == 2
+
 
 class TestSearchFactByKey:
     def test_finds_by_prefix(self, db_path, mock_embedding):

@@ -282,15 +282,36 @@ def save_fact(
 
 
 def memory_save(memory_type: str, key: str, value: str) -> bool:
-    """Wrapper for MEMORY_SAVE commands from LLM responses."""
+    """Wrapper for MEMORY_SAVE commands from LLM responses.
+
+    Upserts by `[key]` prefix within the same category — so a correction like
+    `[wohnort] Chemnitz` replaces any existing `[wohnort] Aue` instead of
+    leaving both rows in the DB. Without this, the only conflict guard is on
+    the full fact text, which never matches when the value changes.
+    """
+    # Accept LLM aliases — models sometimes pass the category name (e.g.
+    # "preference") instead of the documented type. Falling through to
+    # "general" silently caused duplicate facts living in two categories.
     category_map = {
         "user": "preference",
+        "preference": "preference",
         "feedback": "feedback",
         "project": "project",
         "reference": "reference",
     }
-    category = category_map.get(memory_type, "general")
+    category = category_map.get(memory_type)
+    if category is None:
+        log.warning("memory_save: unknown type %r, defaulting to preference", memory_type)
+        category = "preference"
     fact_text = f"[{key}] {value}"
+
+    with connection() as conn:
+        conn.execute(
+            "DELETE FROM facts WHERE category = ? AND fact LIKE ?",
+            (category, f"[{key}] %"),
+        )
+        conn.commit()
+
     return save_fact(fact=fact_text, category=category, source="jarvis", importance=7)
 
 
