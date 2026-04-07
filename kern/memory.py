@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-CONTEXT_MAX_MESSAGES = 20
+CONTEXT_MAX_MESSAGES = 60
+CONTEXT_MAX_CHARS = 80_000  # ~20k Tokens — Sicherheit gegen lange Einzel-Messages
 EMBEDDING_DIMS = 1024
 
 # ── Embedding Client ─────────────────────────────────────────────────────────
@@ -121,8 +122,16 @@ def append_message(msg: dict) -> None:
         conn.commit()
 
 
-def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
+def load_context(
+    max_messages: int = CONTEXT_MAX_MESSAGES,
+    max_chars: int = CONTEXT_MAX_CHARS,
+) -> list[dict]:
     """Load last N messages for current conversation context.
+
+    Hard cap by message count, soft cap by total character budget. If a single
+    huge message blows the char budget, we still keep it (otherwise context
+    becomes empty), but stop adding older messages.
+
     Returns messages in chronological order (oldest first).
     """
     with connection() as conn:
@@ -135,16 +144,22 @@ def load_context(max_messages: int = CONTEXT_MAX_MESSAGES) -> list[dict]:
     if not rows:
         return []
 
-    msgs = []
+    msgs: list[dict] = []
+    total_chars = 0
     for r in rows:
         msg: dict = {"role": r["role"]}
         if r["content"] is not None:
             msg["content"] = r["content"]
+            total_chars += len(r["content"])
         if r["tool_calls"]:
             msg["tool_calls"] = json.loads(r["tool_calls"])
         if r["tool_call_id"]:
             msg["tool_call_id"] = r["tool_call_id"]
         msgs.append(msg)
+        # Stop walking further back once char budget is exhausted —
+        # but keep at least the newest message even if it overflows.
+        if total_chars >= max_chars and len(msgs) >= 1:
+            break
 
     msgs.reverse()
     return msgs

@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS tools (
     name TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL,
     script_path TEXT NOT NULL,
+    args_schema TEXT,  -- JSON list of arg names extracted from main(), e.g. '["query","max_results"]'
     usage_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used_at TIMESTAMP

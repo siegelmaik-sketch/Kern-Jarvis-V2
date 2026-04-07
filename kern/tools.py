@@ -4,6 +4,7 @@ Kern-Jarvis V2 — Tool Registry + Execution
 Local tools: stored in SQLite + tools/ dir, executed via importlib.
 MCP tools:   proxied to MCP servers, prefixed with "mcp__<server>__<tool>".
 """
+import ast
 import importlib.util
 import json
 import logging
@@ -94,18 +95,85 @@ def _validate_script_path(path: str) -> None:
         )
 
 
+def extract_args_schema(script_path: str) -> list[str]:
+    """Parse a tool's main() function and return the keys it pulls from `args`.
+
+    Catches both forms LLM-generated tools commonly use:
+        args.get("query")     -> "query"
+        args["query"]         -> "query"
+
+    Returns the discovered keys in deterministic (first-seen) order. Best-effort
+    only — on syntax errors or unparseable scripts, returns an empty list so
+    that registration doesn't fail. The result is what shows up in the manifest
+    that gets injected into the system prompt, so it's purely advisory for the
+    LLM, not enforced at runtime.
+    """
+    try:
+        source = Path(script_path).read_text()
+        tree = ast.parse(source)
+    except (OSError, SyntaxError) as e:
+        log.warning("Cannot parse tool for args schema [%s]: %s", script_path, e)
+        return []
+
+    main_fn: ast.FunctionDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "main":
+            main_fn = node
+            break
+    if main_fn is None:
+        return []
+
+    keys: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(main_fn):
+        key: str | None = None
+        # args.get("foo") / args.get("foo", default)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "args"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            key = node.args[0].value
+        # args["foo"]
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "args"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            key = node.slice.value
+
+        if key and key not in seen:
+            keys.append(key)
+            seen.add(key)
+    return keys
+
+
 def register_tool(name: str, description: str, script_path: str) -> bool:
     _validate_tool_name(name)
     _validate_script_path(script_path)
 
+    args_schema = extract_args_schema(script_path)
+    args_schema_json = json.dumps(args_schema) if args_schema else None
+
     with connection() as conn:
         conn.execute(
-            "INSERT INTO tools (name, description, script_path) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET description=excluded.description, script_path=excluded.script_path",
-            (name, description, script_path)
+            "INSERT INTO tools (name, description, script_path, args_schema) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET "
+            "description=excluded.description, "
+            "script_path=excluded.script_path, "
+            "args_schema=excluded.args_schema",
+            (name, description, script_path, args_schema_json)
         )
         conn.commit()
-    log.info("Tool registered: %s -> %s", name, script_path)
+    log.info("Tool registered: %s -> %s (args=%s)", name, script_path, args_schema)
     return True
 
 
@@ -235,7 +303,19 @@ def build_tools_manifest() -> str:
     if local:
         lines.append("## Lokale Tools\n")
         for t in local:
-            lines.append(f"- **{t['name']}**: {t['description']} (genutzt: {t['usage_count']}x)")
+            args_hint = ""
+            raw_schema = t.get("args_schema")
+            if raw_schema:
+                try:
+                    keys = json.loads(raw_schema)
+                    if keys:
+                        args_hint = f" — Args: {', '.join(keys)}"
+                except json.JSONDecodeError:
+                    pass
+            lines.append(
+                f"- **{t['name']}**{args_hint}: {t['description']} "
+                f"(genutzt: {t['usage_count']}x)"
+            )
 
     try:
         mcp_tools = load_all_servers()

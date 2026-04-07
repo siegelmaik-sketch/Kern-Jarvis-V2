@@ -113,6 +113,32 @@ class TestParseJarvisCommands:
         assert cmds[0]["type"] == "build_tool"
         assert cmds[0]["name"] == "wetter"
 
+    def test_run_tool_with_empty_dict_args(self):
+        """Llama-style models call tools with explicit empty args={}."""
+        from kern.tool_builder import parse_jarvis_commands
+        text = "RUN_TOOL(name='get_time', args={})"
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        assert cmds[0]["name"] == "get_time"
+        assert cmds[0]["args"] == {}
+
+    def test_run_tool_with_python_dict_args(self):
+        """GPT-style models emit Python dict literals (single quotes) instead of JSON."""
+        from kern.tool_builder import parse_jarvis_commands
+        text = "RUN_TOOL(name='web_search', args={'query': 'bitcoin', 'max_results': 5})"
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        assert cmds[0]["type"] == "run_tool"
+        assert cmds[0]["args"] == {"query": "bitcoin", "max_results": 5}
+
+    def test_run_tool_with_mixed_quotes_args(self):
+        """Mixed: outer dict in Python style with nested string containing double quotes."""
+        from kern.tool_builder import parse_jarvis_commands
+        text = "RUN_TOOL(name='search', args={'query': \"hello world\"})"
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        assert cmds[0]["args"] == {"query": "hello world"}
+
     def test_build_tool_with_inner_quotes(self):
         """Task strings often contain Python dict literals with inner quotes."""
         from kern.tool_builder import parse_jarvis_commands

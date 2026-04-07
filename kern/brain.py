@@ -4,7 +4,9 @@ Kern-Jarvis V2 — LLM Abstraction Layer
 import logging
 import threading
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from kern.db import get_config
 from kern.exceptions import LLMError, ConfigError
@@ -26,16 +28,35 @@ def get_kern_prompt() -> str:
     return KERN_PROMPT_PATH.read_text()
 
 
+_BERLIN_TZ = ZoneInfo("Europe/Berlin")
+_WEEKDAYS_DE = [
+    "Montag", "Dienstag", "Mittwoch", "Donnerstag",
+    "Freitag", "Samstag", "Sonntag",
+]
+
+
+def _now_berlin_context() -> str:
+    """Current Berlin date/time as a one-line dynamic prompt fragment.
+
+    Injected on every turn so the model doesn't have to ask for the date
+    before answering 'what's on today' style questions.
+    """
+    now = datetime.now(_BERLIN_TZ)
+    weekday = _WEEKDAYS_DE[now.weekday()]
+    return (
+        f"Aktuelle Zeit: {weekday}, {now.strftime('%d.%m.%Y %H:%M')} "
+        f"(Europe/Berlin)"
+    )
+
+
 def build_system_prompt(memory_context: str = "", tools_manifest: str = "") -> str:
     kern = get_kern_prompt()
-    dynamic_parts = []
+    dynamic_parts = [_now_berlin_context()]
     if memory_context:
         dynamic_parts.append(memory_context)
     if tools_manifest:
         dynamic_parts.append(tools_manifest)
-    if dynamic_parts:
-        return kern + "\n\n---\n\n" + "\n\n".join(dynamic_parts)
-    return kern
+    return kern + "\n\n---\n\n" + "\n\n".join(dynamic_parts)
 
 
 def get_llm_client() -> tuple[str, object]:

@@ -22,11 +22,14 @@ class TestGetKernPrompt:
 
 
 class TestBuildSystemPrompt:
-    def test_basic_returns_kern_only(self):
+    def test_basic_includes_kern_and_time(self):
+        """Time fragment is now always injected, even with no memory/tools."""
         from kern.brain import build_system_prompt
         with patch("kern.brain.get_kern_prompt", return_value="KERN"):
             result = build_system_prompt()
-            assert result == "KERN"
+            assert "KERN" in result
+            assert "Aktuelle Zeit:" in result
+            assert "Europe/Berlin" in result
 
     def test_with_memory_context(self):
         from kern.brain import build_system_prompt
@@ -34,12 +37,14 @@ class TestBuildSystemPrompt:
             result = build_system_prompt(memory_context="MEMORY")
             assert "KERN" in result
             assert "MEMORY" in result
+            assert "Aktuelle Zeit:" in result
 
     def test_with_tools_manifest(self):
         from kern.brain import build_system_prompt
         with patch("kern.brain.get_kern_prompt", return_value="KERN"):
             result = build_system_prompt(tools_manifest="TOOLS")
             assert "TOOLS" in result
+            assert "Aktuelle Zeit:" in result
 
     def test_with_both_memory_and_tools(self):
         from kern.brain import build_system_prompt
@@ -47,6 +52,17 @@ class TestBuildSystemPrompt:
             result = build_system_prompt(memory_context="MEM", tools_manifest="TOOLS")
             assert "MEM" in result
             assert "TOOLS" in result
+            assert "Aktuelle Zeit:" in result
+
+    def test_time_format_has_german_weekday(self):
+        """Sanity check on the date string format."""
+        from kern.brain import _now_berlin_context
+        ctx = _now_berlin_context()
+        assert "Europe/Berlin" in ctx
+        # Must contain one of the German weekday names
+        weekdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag",
+                    "Freitag", "Samstag", "Sonntag"]
+        assert any(w in ctx for w in weekdays)
 
 
 class TestGetModel:

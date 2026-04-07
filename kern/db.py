@@ -36,7 +36,19 @@ def get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     with connection() as conn:
         conn.executescript(SCHEMA_PATH.read_text())
+        _run_migrations(conn)
         conn.commit()
+
+
+def _run_migrations(conn) -> None:
+    """Idempotent column additions for DBs created before a schema bump.
+
+    SQLite can't `ADD COLUMN IF NOT EXISTS`, so we check `PRAGMA table_info`
+    first. Each migration must be safe to re-run.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(tools)").fetchall()}
+    if "args_schema" not in cols:
+        conn.execute("ALTER TABLE tools ADD COLUMN args_schema TEXT")
 
 
 def get_config(key: str, default: str | None = None) -> str | None:

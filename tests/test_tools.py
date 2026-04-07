@@ -97,6 +97,50 @@ class TestRegisterTool:
         with pytest.raises(ToolSecurityError):
             register_tool("evil", "Evil", "/etc/cron.d/evil.py")
 
+    def test_register_extracts_args_schema(self, db_path, tmp_path):
+        """register_tool stores args.get(...) and args[...] keys discovered in main()."""
+        import kern.tools
+        from kern.tools import register_tool, get_tool
+        old = kern.tools.TOOLS_DIR
+        kern.tools.TOOLS_DIR = tmp_path / "tools"
+        (tmp_path / "tools").mkdir()
+        try:
+            script = tmp_path / "tools" / "mixed_args.py"
+            script.write_text(
+                "def main(args):\n"
+                "    q = args.get('query')\n"
+                "    n = args.get('max_results', 5)\n"
+                "    text = args['text']\n"
+                "    return {'success': True, 'result': (q, n, text)}\n"
+            )
+            register_tool("mixed_args", "uses both styles", str(script))
+            tool = get_tool("mixed_args")
+            import json as _json
+            assert tool["args_schema"] is not None
+            keys = _json.loads(tool["args_schema"])
+            assert keys == ["query", "max_results", "text"]
+        finally:
+            kern.tools.TOOLS_DIR = old
+
+    def test_register_handles_tool_without_args(self, db_path, tmp_path):
+        """A tool that takes no args (e.g. iss_position) gets schema=NULL."""
+        import kern.tools
+        from kern.tools import register_tool, get_tool
+        old = kern.tools.TOOLS_DIR
+        kern.tools.TOOLS_DIR = tmp_path / "tools"
+        (tmp_path / "tools").mkdir()
+        try:
+            script = tmp_path / "tools" / "no_args.py"
+            script.write_text(
+                "def main(args):\n"
+                "    return {'success': True, 'result': 42}\n"
+            )
+            register_tool("no_args", "no args needed", str(script))
+            tool = get_tool("no_args")
+            assert tool["args_schema"] is None
+        finally:
+            kern.tools.TOOLS_DIR = old
+
 
 class TestGetTool:
     def test_nonexistent(self, db_path):

@@ -7,6 +7,7 @@ Tool-Builder Priorität:
 1. Claude Code CLI (wenn installiert + authentifiziert) — beste Qualität
 2. LLM via brain.chat() — Fallback
 """
+import ast
 import json
 import logging
 import os
@@ -247,17 +248,29 @@ def parse_jarvis_commands(text: str) -> list[dict]:
 
     run_matches = re.finditer(
         rf"RUN_TOOL\({ws}name{ws}={ws}(['\"])(.+?)\1"
-        rf"(?:{ws},{ws}args{ws}={ws}(\{{.+?\}}))?{ws}\)",
+        rf"(?:{ws},{ws}args{ws}={ws}(\{{.*?\}}))?{ws}\)",
         text,
         re.DOTALL,
     )
     for m in run_matches:
         args: dict = {}
         if m.group(3):
+            raw = m.group(3)
+            # LLMs swing between strict JSON ({"k": "v"}) and Python dict
+            # literals ({'k': 'v'}). Try JSON first since it's stricter, then
+            # fall back to ast.literal_eval which accepts both styles but
+            # refuses to evaluate arbitrary code (so it's safe on LLM output).
             try:
-                args = json.loads(m.group(3))
+                args = json.loads(raw)
             except json.JSONDecodeError:
-                log.warning("RUN_TOOL args parse failed: %s", m.group(3)[:100])
+                try:
+                    parsed = ast.literal_eval(raw)
+                    if isinstance(parsed, dict):
+                        args = parsed
+                    else:
+                        log.warning("RUN_TOOL args not a dict: %s", raw[:100])
+                except (ValueError, SyntaxError) as e:
+                    log.warning("RUN_TOOL args parse failed (%s): %s", e, raw[:100])
         commands.append({
             "type": "run_tool",
             "name": m.group(2),

@@ -157,6 +157,23 @@ class TestLoadContext:
         assert ctx[-1]["content"] == "msg 29"
         assert ctx[0]["content"] == "msg 25"
 
+    def test_char_budget_caps_history(self, db_path):
+        """If individual messages are huge, char budget stops walking back."""
+        from kern.memory import append_message, load_context
+        for i in range(10):
+            append_message({"role": "user", "content": "x" * 1000 + f" #{i}"})
+        ctx = load_context(max_messages=100, max_chars=3500)
+        assert 3 <= len(ctx) <= 4
+        assert "#9" in ctx[-1]["content"]
+
+    def test_char_budget_keeps_newest_even_if_oversized(self, db_path):
+        """A single huge message must not produce empty context."""
+        from kern.memory import append_message, load_context
+        append_message({"role": "user", "content": "x" * 50_000})
+        ctx = load_context(max_messages=100, max_chars=1000)
+        assert len(ctx) == 1
+        assert len(ctx[0]["content"]) == 50_000
+
 
 class TestClearMessages:
     def test_clears_all(self, db_path):
