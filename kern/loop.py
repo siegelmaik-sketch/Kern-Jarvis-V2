@@ -27,6 +27,7 @@ COMMANDS = {
     "/tools":   "Zeigt alle registrierten Tools",
     "/memory":  "Zeigt den aktuellen Memory-Inhalt",
     "/search":  "Semantische Suche in der Memory (z.B. /search Bitcoin)",
+    "/web":     "Web-Suche via SearXNG (z.B. /web aktuelle wetterlage husum)",
     "/config":  "Konfiguration anzeigen/ändern (z.B. /config set llm_model ...)",
     "/mcp":     "MCP-Server verwalten (add/remove/list/refresh)",
     "/reset":   "Löscht den Nachrichtenverlauf (Facts bleiben erhalten)",
@@ -204,6 +205,31 @@ def print_search(query: str) -> None:
     print()
 
 
+def print_web(query: str) -> None:
+    from kern.web import web_search
+    from kern.exceptions import WebSearchAPIError
+
+    if not query:
+        print("Verwendung: /web <suchbegriff>")
+        return
+    try:
+        results = web_search(query, max_results=5)
+    except WebSearchAPIError as e:
+        print(f"\n  Web-Suche fehlgeschlagen: {e}\n")
+        return
+    if not results:
+        print(f"\nKeine Web-Ergebnisse für '{query}'.\n")
+        return
+    print(f"\n{len(results)} Web-Ergebnis(se) für '{query}':")
+    for i, r in enumerate(results, 1):
+        print(f"  {i}. {r['title']}")
+        print(f"     {r['url']}")
+        if r['snippet']:
+            snippet = r['snippet'][:200] + ("…" if len(r['snippet']) > 200 else "")
+            print(f"     {snippet}")
+    print()
+
+
 def _flush_bg_messages() -> None:
     """Print queued messages from background threads (call from main thread only)."""
     while not _bg_messages.empty():
@@ -258,6 +284,9 @@ def run_loop() -> None:
             continue
         elif user_input.startswith("/search"):
             print_search(user_input[7:].strip())
+            continue
+        elif user_input.startswith("/web"):
+            print_web(user_input[4:].strip())
             continue
         elif user_input.startswith("/config"):
             print_config(user_input[7:].strip())

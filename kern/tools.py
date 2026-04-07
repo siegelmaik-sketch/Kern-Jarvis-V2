@@ -20,6 +20,64 @@ _VALID_TOOL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 MCP_PREFIX = "mcp__"
 
 
+# ── Builtin Tools ─────────────────────────────────────────────────────────────
+# Foundational capabilities baked into kern/. The LLM calls these via the same
+# RUN_TOOL(name=...) mechanism as user-built tools, but they dispatch to Python
+# functions instead of dynamic scripts. They cannot be removed or overwritten.
+
+def _builtin_web_search(args: dict) -> dict:
+    from kern.web import web_search
+    from kern.exceptions import WebSearchAPIError
+
+    query = args.get("query", "").strip()
+    max_results = int(args.get("max_results", 5))
+    if not query:
+        return {"success": False, "error": "Argument 'query' fehlt"}
+    try:
+        results = web_search(query, max_results=max_results)
+        return {"success": True, "result": results}
+    except WebSearchAPIError as e:
+        return {"success": False, "error": str(e)}
+    except ValueError as e:
+        return {"success": False, "error": f"Ungültige Argumente: {e}"}
+
+
+def _builtin_web_fetch(args: dict) -> dict:
+    from kern.web import web_fetch
+    from kern.exceptions import WebFetchError
+
+    url = args.get("url", "").strip()
+    max_chars = int(args.get("max_chars", 8000))
+    if not url:
+        return {"success": False, "error": "Argument 'url' fehlt"}
+    try:
+        result = web_fetch(url, max_chars=max_chars)
+        return {"success": True, "result": result}
+    except WebFetchError as e:
+        return {"success": False, "error": str(e)}
+    except ValueError as e:
+        return {"success": False, "error": f"Ungültige Argumente: {e}"}
+
+
+BUILTIN_TOOLS: dict[str, dict] = {
+    "web_search": {
+        "description": (
+            "Web-Suche via SearXNG. Args: query (str, required), max_results (int, default 5). "
+            "Liefert Liste von {title, url, snippet, engine}."
+        ),
+        "handler": _builtin_web_search,
+    },
+    "web_fetch": {
+        "description": (
+            "Lädt eine URL und extrahiert den Hauptinhalt (boilerplate-frei). "
+            "Args: url (str, required), max_chars (int, default 8000). "
+            "Liefert {url, title, text, truncated}."
+        ),
+        "handler": _builtin_web_fetch,
+    },
+}
+
+
 def _validate_tool_name(name: str) -> None:
     if not _VALID_TOOL_NAME.match(name):
         raise ToolSecurityError(
@@ -93,6 +151,16 @@ def run_tool(name: str, args: dict | None = None) -> dict:
     if name.startswith(MCP_PREFIX):
         return run_mcp_tool(name, args)
 
+    # Builtins take precedence — cannot be shadowed by user-built tools
+    if name in BUILTIN_TOOLS:
+        try:
+            result = BUILTIN_TOOLS[name]["handler"](args or {})
+            log.info("Builtin tool executed: %s (args=%s)", name, args)
+            return result
+        except Exception as e:
+            log.exception("Builtin tool failed [%s]", name)
+            return {"success": False, "error": str(e)}
+
     tool = get_tool(name)
     if not tool:
         return {"success": False, "error": f"Tool '{name}' nicht gefunden"}
@@ -145,6 +213,12 @@ def build_tools_manifest() -> str:
     from kern.mcp_client import load_all_servers
 
     lines: list[str] = []
+
+    if BUILTIN_TOOLS:
+        lines.append("## Builtin Tools\n")
+        for name, spec in BUILTIN_TOOLS.items():
+            lines.append(f"- **{name}**: {spec['description']}")
+        lines.append("")
 
     local = list_tools()
     if local:

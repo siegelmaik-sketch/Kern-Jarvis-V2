@@ -264,9 +264,13 @@ class TestSaveToolScript:
 
 
 class TestBuildToolsManifest:
-    def test_empty(self, db_path):
+    def test_empty_local_still_shows_builtins(self, db_path):
+        # Builtins are always present; the manifest is never empty
         from kern.tools import build_tools_manifest
-        assert build_tools_manifest() == ""
+        manifest = build_tools_manifest()
+        assert "Builtin Tools" in manifest
+        assert "web_search" in manifest
+        assert "Lokale Tools" not in manifest
 
     def test_with_tools(self, db_path, tmp_path):
         import kern.tools

@@ -28,3 +28,15 @@ class ToolSecurityError(ToolError):
 
 class MCPError(KernError):
     """Raised when MCP server communication fails."""
+
+
+class WebSearchError(KernError):
+    """Base exception for web search / fetch operations."""
+
+
+class WebSearchAPIError(WebSearchError):
+    """Raised when the search backend (SearXNG) is unreachable or returns an error."""
+
+
+class WebFetchError(WebSearchError):
+    """Raised when fetching or extracting a URL fails."""
