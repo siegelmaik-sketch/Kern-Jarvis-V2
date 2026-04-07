@@ -96,11 +96,11 @@ def _build_tool_with_claude_code(tool_name: str, description: str, task: str) ->
             cwd=str(TOOLS_DIR),
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=600,
             env=cc_env,
         )
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Claude Code timeout (180s)"}
+        return {"success": False, "error": "Claude Code timeout (600s)"}
     except Exception as e:
         return {"success": False, "error": f"Claude Code subprocess error: {e}"}
 
