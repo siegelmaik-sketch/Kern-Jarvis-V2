@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-CONTEXT_MAX_MESSAGES = 60
+CONTEXT_MAX_MESSAGES = 20
 CONTEXT_MAX_CHARS = 80_000  # ~20k Tokens — Sicherheit gegen lange Einzel-Messages
 EMBEDDING_DIMS = 1024
 
