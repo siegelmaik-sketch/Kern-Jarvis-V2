@@ -11,6 +11,7 @@ services:
       - ~/.claude:/root/.claude:ro  # Claude Code OAuth credentials
     environment:
       - PYTHONUNBUFFERED=1
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
     networks:
       - default
       - jarvis-shared

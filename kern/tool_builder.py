@@ -85,6 +85,10 @@ def _build_tool_with_claude_code(tool_name: str, description: str, task: str) ->
     log.info("Building tool with Claude Code: %s", tool_name)
     print(f"\n  Claude Code baut Tool: {tool_name}...")
 
+    # IS_SANDBOX=1 lets `--dangerously-skip-permissions` work even when CC
+    # is run as root inside a Docker container. Without it CC refuses with
+    # "cannot be used with root/sudo privileges for security reasons".
+    cc_env = {**os.environ, "IS_SANDBOX": "1"}
     try:
         result = subprocess.run(
             [claude_bin, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "text"],
@@ -92,6 +96,7 @@ def _build_tool_with_claude_code(tool_name: str, description: str, task: str) ->
             capture_output=True,
             text=True,
             timeout=180,
+            env=cc_env,
         )
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "Claude Code timeout (180s)"}
@@ -161,93 +166,101 @@ def parse_jarvis_commands(text: str) -> list[dict]:
     pretty-print calls across multiple lines when they have several args
     (`name=...,\\n    args=...`), so every regex uses `\\s*` instead of a
     literal space and runs with `re.DOTALL`.
+
+    String values use a backreferenced quote (`(['"])(.+?)\\1`) so the
+    closing quote MUST match the opening one. This prevents bugs where a
+    `task="...{'foo': 'bar'}..."` value (double-quoted, but containing
+    inner single quotes) would otherwise terminate at the first inner
+    single quote and silently lose half the task description.
     """
     commands: list[dict] = []
     ws = r"\s*"  # shorthand: optional whitespace incl. newlines
+    # Quoted string: same quote char at both ends. Group 1 = quote, group 2 = value.
+    # Caller indexes the value group via the named placement; we re-number per call.
 
     register_matches = re.finditer(
-        rf"REGISTER_TOOL\({ws}name{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
-        rf"description{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
-        rf"script_path{ws}={ws}['\"](.+?)['\"]{ws}\)",
+        rf"REGISTER_TOOL\({ws}name{ws}={ws}(['\"])(.+?)\1{ws},{ws}"
+        rf"description{ws}={ws}(['\"])(.+?)\3{ws},{ws}"
+        rf"script_path{ws}={ws}(['\"])(.+?)\5{ws}\)",
         text,
         re.DOTALL,
     )
     for m in register_matches:
         commands.append({
             "type": "register_tool",
-            "name": m.group(1),
-            "description": m.group(2),
-            "script_path": m.group(3)
+            "name": m.group(2),
+            "description": m.group(4),
+            "script_path": m.group(6)
         })
 
     build_matches = re.finditer(
-        rf"BUILD_TOOL\({ws}name{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
-        rf"description{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
-        rf"task{ws}={ws}['\"](.+?)['\"]{ws}\)",
+        rf"BUILD_TOOL\({ws}name{ws}={ws}(['\"])(.+?)\1{ws},{ws}"
+        rf"description{ws}={ws}(['\"])(.+?)\3{ws},{ws}"
+        rf"task{ws}={ws}(['\"])(.+?)\5{ws}\)",
         text,
         re.DOTALL,
     )
     for m in build_matches:
         commands.append({
             "type": "build_tool",
-            "name": m.group(1),
-            "description": m.group(2),
-            "task": m.group(3)
+            "name": m.group(2),
+            "description": m.group(4),
+            "task": m.group(6)
         })
 
     memory_save_matches = re.finditer(
-        rf"MEMORY_SAVE\({ws}type{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
-        rf"key{ws}={ws}['\"](.+?)['\"]{ws},{ws}"
-        rf"value{ws}={ws}['\"](.+?)['\"]{ws}\)",
+        rf"MEMORY_SAVE\({ws}type{ws}={ws}(['\"])(.+?)\1{ws},{ws}"
+        rf"key{ws}={ws}(['\"])(.+?)\3{ws},{ws}"
+        rf"value{ws}={ws}(['\"])(.+?)\5{ws}\)",
         text,
         re.DOTALL,
     )
     for m in memory_save_matches:
         commands.append({
             "type": "memory_save",
-            "memory_type": m.group(1),
-            "key": m.group(2),
-            "value": m.group(3)
+            "memory_type": m.group(2),
+            "key": m.group(4),
+            "value": m.group(6)
         })
 
     memory_get_matches = re.finditer(
-        rf"MEMORY_GET\({ws}key{ws}={ws}['\"](.+?)['\"]{ws}\)",
+        rf"MEMORY_GET\({ws}key{ws}={ws}(['\"])(.+?)\1{ws}\)",
         text,
         re.DOTALL,
     )
     for m in memory_get_matches:
         commands.append({
             "type": "memory_get",
-            "key": m.group(1),
+            "key": m.group(2),
         })
 
     memory_search_matches = re.finditer(
-        rf"MEMORY_SEARCH\({ws}query{ws}={ws}['\"](.+?)['\"]{ws}\)",
+        rf"MEMORY_SEARCH\({ws}query{ws}={ws}(['\"])(.+?)\1{ws}\)",
         text,
         re.DOTALL,
     )
     for m in memory_search_matches:
         commands.append({
             "type": "memory_search",
-            "query": m.group(1),
+            "query": m.group(2),
         })
 
     run_matches = re.finditer(
-        rf"RUN_TOOL\({ws}name{ws}={ws}['\"](.+?)['\"]"
+        rf"RUN_TOOL\({ws}name{ws}={ws}(['\"])(.+?)\1"
         rf"(?:{ws},{ws}args{ws}={ws}(\{{.+?\}}))?{ws}\)",
         text,
         re.DOTALL,
     )
     for m in run_matches:
         args: dict = {}
-        if m.group(2):
+        if m.group(3):
             try:
-                args = json.loads(m.group(2))
+                args = json.loads(m.group(3))
             except json.JSONDecodeError:
-                log.warning("RUN_TOOL args parse failed: %s", m.group(2)[:100])
+                log.warning("RUN_TOOL args parse failed: %s", m.group(3)[:100])
         commands.append({
             "type": "run_tool",
-            "name": m.group(1),
+            "name": m.group(2),
             "args": args
         })
 

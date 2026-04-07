@@ -113,6 +113,24 @@ class TestParseJarvisCommands:
         assert cmds[0]["type"] == "build_tool"
         assert cmds[0]["name"] == "wetter"
 
+    def test_build_tool_with_inner_quotes(self):
+        """Task strings often contain Python dict literals with inner quotes."""
+        from kern.tool_builder import parse_jarvis_commands
+        text = (
+            'BUILD_TOOL(\n'
+            '    name="weather",\n'
+            '    description="Wetter-Tool",\n'
+            "    task=\"Erstelle ein Python-Skript. Rückgabeformat: "
+            "{'success': bool, 'report': str}\"\n"
+            ')'
+        )
+        cmds = parse_jarvis_commands(text)
+        assert len(cmds) == 1
+        assert cmds[0]["name"] == "weather"
+        # Critical: the inner single quotes must NOT terminate the task string
+        assert "Rückgabeformat" in cmds[0]["task"]
+        assert "report" in cmds[0]["task"]
+
 
 class TestExecuteCommands:
     def test_memory_save(self, db_path, mock_embedding):
