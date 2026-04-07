@@ -22,9 +22,13 @@ DEFAULT_SEARXNG_URL = "http://searxng:8080"
 DEFAULT_LANGUAGE = "de"
 DEFAULT_MAX_RESULTS = 5
 DEFAULT_TIMEOUT = 15.0
-DEFAULT_FETCH_TIMEOUT = 20.0
+DEFAULT_FETCH_TIMEOUT = 30.0  # seconds; playwright needs more headroom than httpx
 DEFAULT_CACHE_TTL = 3600  # 1 hour
 MAX_FETCH_BYTES = 2_000_000  # 2 MB hard cap
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 def _cache_lookup(query: str, language: str, ttl: int) -> list[dict] | None:
@@ -139,49 +143,71 @@ def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict]
     return cached_results[:max_results]
 
 
+def _render_html(url: str) -> tuple[str, str]:
+    """
+    Render `url` in a headless Chromium and return (final_url, html).
+
+    Uses playwright sync API. Waits for `networkidle` so JS-rendered SPAs
+    (Tagesschau, FAZ, Twitter, etc.) have a chance to populate the DOM
+    before we grab the content. Raises PlaywrightError on transport,
+    timeout, or navigation failures — caller maps it to WebFetchError.
+    """
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+    timeout_ms = int(DEFAULT_FETCH_TIMEOUT * 1000)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(
+                user_agent=BROWSER_USER_AGENT,
+                locale="de-DE",
+                viewport={"width": 1280, "height": 800},
+                extra_http_headers={
+                    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+                },
+            )
+            page = context.new_page()
+            # Hard wait: HTML parsed. Soft wait: try for networkidle so SPAs
+            # can hydrate, but don't fail if ad/tracker scripts keep the
+            # network busy forever (Tagesschau, t-online, etc.).
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except PlaywrightTimeout:
+                log.debug("networkidle timeout for %s — proceeding with current DOM", url)
+            html = page.content()
+            final_url = page.url
+            return final_url, html
+        finally:
+            browser.close()
+
+
 def web_fetch(url: str, max_chars: int = 8000) -> dict:
     """
-    Fetch a URL and extract the main textual content.
+    Fetch a URL with a real headless browser and extract the main text.
 
-    Uses trafilatura for boilerplate removal. Falls back to raw text if
-    trafilatura is unavailable or extraction returns nothing.
+    Renders the page in Chromium (Playwright) so client-side-rendered sites
+    work, then runs trafilatura on the resulting DOM for boilerplate-free
+    extraction.
 
     Returns a dict: {"url": str, "title": str, "text": str, "truncated": bool}.
-    Raises WebFetchError on transport or extraction failures.
+    Raises WebFetchError on render or extraction failures.
     """
+    from playwright.sync_api import Error as PlaywrightError
+
     if not url or not url.strip():
         raise ValueError("url must be a non-empty string")
     if max_chars < 100:
         raise ValueError("max_chars must be >= 100")
 
     try:
-        with httpx.Client(
-            follow_redirects=True,
-            timeout=DEFAULT_FETCH_TIMEOUT,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                ),
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "image/avif,image/webp,*/*;q=0.8"
-                ),
-                "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-                "Accept-Encoding": "gzip, deflate, br",
-                "DNT": "1",
-                "Upgrade-Insecure-Requests": "1",
-            },
-        ) as client:
-            response = client.get(url)
-            response.raise_for_status()
-    except httpx.HTTPError as e:
-        log.exception("web_fetch failed for url=%r", url)
+        final_url, raw_html = _render_html(url)
+    except PlaywrightError as e:
+        log.exception("web_fetch render failed for url=%r", url)
         raise WebFetchError(f"Fetch failed: {e}") from e
 
-    raw_html = response.content[:MAX_FETCH_BYTES].decode(
-        response.encoding or "utf-8", errors="replace"
-    )
+    if len(raw_html) > MAX_FETCH_BYTES:
+        raw_html = raw_html[:MAX_FETCH_BYTES]
 
     title = ""
     text = ""
@@ -212,7 +238,7 @@ def web_fetch(url: str, max_chars: int = 8000) -> dict:
         text = text[:max_chars]
 
     return {
-        "url": str(response.url),
+        "url": final_url,
         "title": title,
         "text": text,
         "truncated": truncated,

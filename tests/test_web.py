@@ -207,38 +207,25 @@ class TestWebSearch:
 
 
 class TestWebFetch:
-    def _mock_httpx_client(self, status: int = 200, content: bytes = b"", encoding: str = "utf-8"):
-        """Helper to build a mocked httpx.Client context manager."""
-        mock_response = MagicMock()
-        mock_response.status_code = status
-        mock_response.content = content
-        mock_response.encoding = encoding
-        mock_response.url = "https://example.com/page"
-        mock_response.raise_for_status.return_value = None
-
-        mock_client = MagicMock()
-        mock_client.__enter__.return_value = mock_client
-        mock_client.__exit__.return_value = False
-        mock_client.get.return_value = mock_response
-        return mock_client, mock_response
-
     def test_web_fetch_extracts_main_text(self, db_path):
         # Arrange
         from kern.web import web_fetch
         html = (
-            b"<html><head><title>Test Page</title></head>"
-            b"<body><nav>menu</nav><article>"
-            b"<h1>Hauptueberschrift</h1>"
-            b"<p>Das ist der Hauptinhalt eines Artikels mit ausreichend Text "
-            b"um die Boilerplate-Erkennung von trafilatura zu ueberzeugen. "
-            b"Hier kommt noch mehr Inhalt damit die Heuristik anschlaegt. "
-            b"Lorem ipsum dolor sit amet consectetur adipiscing elit.</p>"
-            b"</article><footer>footer text</footer></body></html>"
+            "<html><head><title>Test Page</title></head>"
+            "<body><nav>menu</nav><article>"
+            "<h1>Hauptueberschrift</h1>"
+            "<p>Das ist der Hauptinhalt eines Artikels mit ausreichend Text "
+            "um die Boilerplate-Erkennung von trafilatura zu ueberzeugen. "
+            "Hier kommt noch mehr Inhalt damit die Heuristik anschlaegt. "
+            "Lorem ipsum dolor sit amet consectetur adipiscing elit.</p>"
+            "</article><footer>footer text</footer></body></html>"
         )
-        mock_client, _ = self._mock_httpx_client(content=html)
 
         # Act
-        with patch("kern.web.httpx.Client", return_value=mock_client):
+        with patch(
+            "kern.web._render_html",
+            return_value=("https://example.com/page", html),
+        ):
             result = web_fetch("https://example.com/page")
 
         # Assert
@@ -260,29 +247,30 @@ class TestWebFetch:
         # Arrange
         from kern.web import web_fetch
         long_text = "Wort " * 5000
-        html = f"<html><body><article><p>{long_text}</p></article></body></html>".encode()
-        mock_client, _ = self._mock_httpx_client(content=html)
+        html = f"<html><body><article><p>{long_text}</p></article></body></html>"
 
         # Act
-        with patch("kern.web.httpx.Client", return_value=mock_client):
+        with patch(
+            "kern.web._render_html",
+            return_value=("https://example.com", html),
+        ):
             result = web_fetch("https://example.com", max_chars=500)
 
         # Assert
         assert len(result["text"]) == 500
         assert result["truncated"] is True
 
-    def test_web_fetch_on_http_error_raises_webfetch_error(self, db_path):
+    def test_web_fetch_on_render_error_raises_webfetch_error(self, db_path):
         # Arrange
         from kern.web import web_fetch
         from kern.exceptions import WebFetchError
-
-        mock_client = MagicMock()
-        mock_client.__enter__.return_value = mock_client
-        mock_client.__exit__.return_value = False
-        mock_client.get.side_effect = httpx.ConnectError("nope")
+        from playwright.sync_api import Error as PlaywrightError
 
         # Act + Assert
-        with patch("kern.web.httpx.Client", return_value=mock_client):
+        with patch(
+            "kern.web._render_html",
+            side_effect=PlaywrightError("net::ERR_CONNECTION_REFUSED"),
+        ):
             with pytest.raises(WebFetchError, match="Fetch failed"):
                 web_fetch("https://broken.example")
 
@@ -292,11 +280,13 @@ class TestWebFetch:
         from kern.exceptions import WebFetchError
 
         # Trafilatura returns nothing for empty body
-        html = b"<html><body></body></html>"
-        mock_client, _ = self._mock_httpx_client(content=html)
+        html = "<html><body></body></html>"
 
         # Act + Assert
-        with patch("kern.web.httpx.Client", return_value=mock_client):
+        with patch(
+            "kern.web._render_html",
+            return_value=("https://empty.example", html),
+        ):
             with pytest.raises(WebFetchError, match="extract"):
                 web_fetch("https://empty.example")
 
